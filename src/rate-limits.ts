@@ -162,29 +162,30 @@ function formatSnapshot(snapshot: ProviderUsageSnapshot): Record<string, any> {
 function formatCachedLimits(cached: CachedRateLimitData): Record<string, any> {
   const result: Record<string, any> = {
     provider: cached.provider,
-    status: cached.status,
   };
 
+  // Map fiveHour → session, sevenDay → weekly
+  // Client expects: { used: number, limit: number, resetsAt: string (ISO) }
   if (cached.fiveHour) {
-    result.fiveHour = {
-      utilization: cached.fiveHour.utilization,
-      usedPercent: Math.round(cached.fiveHour.utilization * 100),
-      resetsAt: cached.fiveHour.resetsAt,
-      status: cached.fiveHour.status,
+    result.session = {
+      used: Math.round(cached.fiveHour.utilization * 100),
+      limit: 100,
+      resetsAt: cached.fiveHour.resetsAt
+        ? new Date(cached.fiveHour.resetsAt * 1000).toISOString()
+        : undefined,
     };
   }
 
   if (cached.sevenDay) {
-    result.sevenDay = {
-      utilization: cached.sevenDay.utilization,
-      usedPercent: Math.round(cached.sevenDay.utilization * 100),
-      resetsAt: cached.sevenDay.resetsAt,
-      status: cached.sevenDay.status,
+    result.weekly = {
+      used: Math.round(cached.sevenDay.utilization * 100),
+      limit: 100,
+      resetsAt: cached.sevenDay.resetsAt
+        ? new Date(cached.sevenDay.resetsAt * 1000).toISOString()
+        : undefined,
     };
   }
 
-  result.lastUpdated = cached.lastUpdated;
-  result.source = 'proxy';
   return result;
 }
 
