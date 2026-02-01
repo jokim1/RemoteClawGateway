@@ -1,42 +1,61 @@
 {
-  "id": "remoteclaw-gateway",
-  "name": "RemoteClaw Gateway",
-  "version": "0.1.0",
-  "description": "Gateway plugin for RemoteClaw — providers, rate limits, and voice endpoints",
-  "author": "Joseph Kim",
+  "id": "remoteclaw",
   "configSchema": {
     "type": "object",
+    "additionalProperties": false,
     "properties": {
-      "proxyPort": {
-        "type": "number",
-        "default": 18793,
-        "description": "Port for rate-limit capture proxy"
-      },
       "providers": {
         "type": "object",
-        "description": "Per-provider billing config (e.g. { anthropic: { billing: 'subscription', plan: 'Max Pro', monthlyPrice: 200 } })"
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "billing": {
+              "type": "string",
+              "enum": ["api", "subscription"]
+            },
+            "plan": {
+              "type": "string"
+            },
+            "monthlyPrice": {
+              "type": "number"
+            }
+          }
+        }
       },
       "voice": {
         "type": "object",
-        "description": "Voice configuration for STT/TTS",
+        "additionalProperties": false,
         "properties": {
           "stt": {
             "type": "object",
+            "additionalProperties": false,
             "properties": {
-              "provider": { "type": "string", "default": "openai" },
-              "model": { "type": "string", "default": "whisper-1" }
+              "provider": { "type": "string" },
+              "model": { "type": "string" }
             }
           },
           "tts": {
             "type": "object",
+            "additionalProperties": false,
             "properties": {
-              "provider": { "type": "string", "default": "openai" },
-              "model": { "type": "string", "default": "tts-1" },
-              "defaultVoice": { "type": "string", "default": "nova" }
+              "provider": { "type": "string" },
+              "model": { "type": "string" },
+              "defaultVoice": { "type": "string" }
             }
           }
         }
       }
+    }
+  },
+  "uiHints": {
+    "providers": {
+      "label": "Provider Billing Config",
+      "help": "Per-provider billing mode. Keys are provider IDs (e.g. anthropic, deepseek)."
+    },
+    "voice": {
+      "label": "Voice Config",
+      "help": "STT/TTS configuration. Defaults to OpenAI Whisper + TTS if OPENAI_API_KEY is set."
     }
   }
 }
