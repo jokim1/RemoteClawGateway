@@ -52,6 +52,15 @@
             }
           }
         }
+      },
+      "pairPassword": {
+        "type": "string"
+      },
+      "externalUrl": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
       }
     }
   },
@@ -63,6 +72,18 @@
     "voice": {
       "label": "Voice Config",
       "help": "STT/TTS configuration. Defaults to OpenAI Whisper + TTS if OPENAI_API_KEY is set."
+    },
+    "pairPassword": {
+      "label": "Pairing Password",
+      "help": "Password for mobile pairing. If unset, the /api/pair endpoint is disabled."
+    },
+    "externalUrl": {
+      "label": "External URL",
+      "help": "Preferred client URL (e.g. Tailscale Funnel URL). Returned during pairing."
+    },
+    "name": {
+      "label": "Gateway Name",
+      "help": "Friendly name for this gateway, returned during pairing."
     }
   }
 }

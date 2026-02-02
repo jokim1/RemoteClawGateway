@@ -59,6 +59,9 @@ export interface RemoteClawPluginConfig {
   proxyPort?: number;
   providers?: Record<string, ProviderBillingConfig>;
   voice?: VoicePluginConfig;
+  pairPassword?: string;
+  externalUrl?: string;
+  name?: string;
 }
 
 export interface UsageWindow {

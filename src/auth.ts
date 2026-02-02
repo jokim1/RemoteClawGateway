@@ -8,12 +8,12 @@ function getBearerToken(req: IncomingMessage): string | undefined {
   return token || undefined;
 }
 
-function safeEqual(a: string, b: string): boolean {
+export function safeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   return timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
-function resolveGatewayToken(cfg: Record<string, any>): string | undefined {
+export function resolveGatewayToken(cfg: Record<string, any>): string | undefined {
   return (
     cfg.gateway?.auth?.token ??
     process.env.CLAWDBOT_GATEWAY_TOKEN ??
