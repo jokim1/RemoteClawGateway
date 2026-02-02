@@ -1,16 +1,17 @@
 # RemoteClawGateway
 
-A [Moltbot](https://github.com/jokim1/moltbot) plugin that powers [RemoteClaw](https://github.com/jokim1/RemoteClaw).
+A [Moltbot](https://github.com/jokim1/moltbot) plugin that powers [RemoteClaw](https://github.com/jokim1/RemoteClaw) and [ClawTalk](https://github.com/jokim1/ClawTalk).
 
-This plugin runs on your server alongside Moltbot. It adds HTTP endpoints that RemoteClaw (the terminal client) uses to discover providers, track rate limits, and do voice input/output. Your API keys stay on the server — the client never sees them.
+This plugin runs on your server alongside Moltbot. It adds HTTP endpoints that RemoteClaw (terminal client) and ClawTalk (iOS app) use to discover providers, track rate limits, and do voice input/output. Your API keys stay on the server — the client never sees them.
 
 ## What it does
 
-- **`/api/providers`** — tells RemoteClaw which LLM providers are available and how they're billed
+- **`/api/providers`** — lists available LLM providers and billing info
 - **`/api/rate-limits`** — reports usage and rate-limit data for subscription plans (e.g. Anthropic Max)
-- **`/api/voice/capabilities`** — tells RemoteClaw whether speech-to-text and text-to-speech are available
+- **`/api/voice/capabilities`** — reports whether speech-to-text and text-to-speech are available
 - **`/api/voice/transcribe`** — accepts audio, returns transcribed text (via OpenAI Whisper)
 - **`/api/voice/synthesize`** — accepts text, returns spoken audio (via OpenAI TTS)
+- **`/api/pair`** — lets ClawTalk (iOS) auto-configure by exchanging a pairing password for the full gateway config (disabled by default)
 
 ## Setup
 
@@ -93,25 +94,57 @@ plugins:
         billing: "api"
 ```
 
+### Step 5: Enable ClawTalk pairing (optional)
+
+If you use [ClawTalk](https://github.com/jokim1/ClawTalk) (the iOS app), you can enable a pairing flow so new devices only need your server's Tailscale IP and a password — no manual token or URL entry.
+
+Set a pairing password in your Moltbot plugin config:
+
+```yaml
+plugins:
+  remoteclaw:
+    pairPassword: "pick-a-secret"
+    name: "Home Server"           # optional — friendly name shown in the app
+    externalUrl: "https://myhost.tail1234.ts.net"  # optional — see below
+```
+
+Or use an environment variable instead:
+
+```bash
+export CLAWDBOT_PAIR_PASSWORD="pick-a-secret"
+```
+
+**How it works:** The user opens ClawTalk, taps Add Gateway, enters the server IP and the pairing password, and taps Connect. The gateway validates the password, then returns the full config (URL, auth token, agent ID). The app fills everything in automatically.
+
+**`externalUrl`** — By default, the pairing response uses the URL the client connected to. Set `externalUrl` if you want clients to use a different address long-term, e.g. a Tailscale Funnel hostname (`https://myhost.tail1234.ts.net`) even when pairing happens over a direct Tailscale IP.
+
+**Security:**
+- The endpoint is **disabled by default**. It only activates when `pairPassword` is set.
+- Passwords are compared using timing-safe equality.
+- Rate limited to 5 attempts per IP per minute.
+
+**Don't use ClawTalk?** You don't need to do anything. Without a `pairPassword`, the `/api/pair` endpoint returns 404 and is invisible to clients. RemoteClaw (the terminal client) doesn't use it.
+
 ## How it all fits together
 
 ```
-Your machine                       Your server
+Your machines                      Your server
 ┌──────────────┐                  ┌──────────────────────────────┐
 │  RemoteClaw   │                 │  Moltbot                      │
-│  (terminal)   │                 │  ├── /v1/chat/completions     │ ← chat (built into Moltbot)
-│               │───── HTTP ─────▶│  ├── /v1/models               │ ← model list (built in)
-│               │                 │  │                             │
-│               │                 │  └── RemoteClawGateway plugin  │ ← this repo
-│               │                 │      ├── /api/providers        │
-│               │                 │      ├── /api/rate-limits      │
+│  (terminal)   │───── HTTP ─────▶│  ├── /v1/chat/completions     │ ← chat (built into Moltbot)
+│               │                 │  ├── /v1/models               │ ← model list (built in)
+└──────────────┘                  │  │                             │
+                                  │  └── RemoteClawGateway plugin  │ ← this repo
+┌──────────────┐                  │      ├── /api/pair             │ ← ClawTalk pairing (opt-in)
+│  ClawTalk     │                 │      ├── /api/providers        │
+│  (iOS)        │───── HTTP ─────▶│      ├── /api/rate-limits      │
 │               │                 │      ├── /api/voice/capabilities│
-│               │                 │      ├── /api/voice/transcribe │
-│               │                 │      └── /api/voice/synthesize │
-└──────────────┘                  └──────────────────────────────┘
+└──────────────┘                  │      ├── /api/voice/transcribe │
+                                  │      └── /api/voice/synthesize │
+                                  └──────────────────────────────┘
 ```
 
-Moltbot handles chat and model routing. This plugin adds the extra endpoints RemoteClaw needs for provider info, rate limits, and voice.
+Moltbot handles chat and model routing. This plugin adds the extra endpoints that RemoteClaw and ClawTalk need for provider info, rate limits, voice, and mobile pairing.
 
 ## API reference
 
@@ -197,12 +230,40 @@ Send text, get audio back.
 
 `voice` and `speed` are optional.
 
+### POST /api/pair
+
+Exchange a pairing password for the full gateway config. **Does not require bearer auth** — authentication is via the pairing password itself. Disabled (returns 404) unless `pairPassword` is configured.
+
+- **Content-Type**: `application/json`
+- **Body**: `{ "password": "your-pair-password" }`
+
+```json
+{
+  "name": "Home Server",
+  "gatewayURL": "http://100.64.0.1:18789",
+  "port": 18789,
+  "authToken": "your-gateway-token",
+  "agentID": "mobileclaw"
+}
+```
+
+| Status | Meaning |
+|--------|---------|
+| 200 | Success |
+| 400 | Missing password or bad JSON |
+| 403 | Wrong password |
+| 404 | Pairing not configured |
+| 405 | Non-POST method |
+| 429 | Rate limited (5 attempts/min per IP) |
+
 ## Authentication
 
 The plugin checks requests in this order:
 
 1. If a token is configured (via config or `CLAWDBOT_GATEWAY_TOKEN` env var), the request must include `Authorization: Bearer <token>`
 2. If no token is configured, only localhost requests are allowed
+
+**Exception:** `/api/pair` does not use bearer auth. It authenticates via the pairing password in the request body, and is disabled entirely unless `pairPassword` is configured.
 
 Token comparison uses timing-safe equality to prevent timing attacks.
 
