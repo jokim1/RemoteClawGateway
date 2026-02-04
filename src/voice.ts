@@ -8,9 +8,16 @@ import { sendJson, readJsonBody } from './http.js';
 // Constants
 // ---------------------------------------------------------------------------
 
-const TTS_VOICES = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'];
+const OPENAI_TTS_VOICES = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'];
+const CARTESIA_TTS_VOICES = ['sonic-english', 'sonic-multilingual'];
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB
 const MAX_TEXT_LENGTH = 4096;
+
+// Cartesia voice ID mappings (example voices)
+const CARTESIA_VOICE_IDS: Record<string, string> = {
+  'sonic-english': 'a0e99841-438c-4a64-b679-ae501e7d6091', // Example voice ID
+  'sonic-multilingual': 'a0e99841-438c-4a64-b679-ae501e7d6091',
+};
 
 // ---------------------------------------------------------------------------
 // Multipart parser
@@ -114,6 +121,48 @@ export async function synthesizeViaOpenAI(
   return Buffer.from(arrayBuffer);
 }
 
+export async function synthesizeViaCartesia(
+  text: string,
+  voiceId: string,
+  _model?: string,
+): Promise<Buffer> {
+  const apiKey = process.env.CARTESIA_API_KEY;
+  if (!apiKey) throw new Error('CARTESIA_API_KEY not set');
+
+  // Map voice name to voice ID if needed
+  const resolvedVoiceId = CARTESIA_VOICE_IDS[voiceId] || voiceId;
+
+  const response = await fetch('https://api.cartesia.ai/tts/bytes', {
+    method: 'POST',
+    headers: {
+      'X-API-Key': apiKey,
+      'Cartesia-Version': '2024-06-10',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model_id: 'sonic-english',
+      transcript: text,
+      voice: {
+        mode: 'id',
+        id: resolvedVoiceId,
+      },
+      output_format: {
+        container: 'mp3',
+        encoding: 'mp3',
+        sample_rate: 44100,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const errBody = await response.text().catch(() => '');
+    throw new Error(`Cartesia TTS error (${response.status}): ${errBody.slice(0, 200)}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
 // ---------------------------------------------------------------------------
 // Voice availability helper
 // ---------------------------------------------------------------------------
@@ -121,11 +170,27 @@ export async function synthesizeViaOpenAI(
 export function resolveVoiceAvailability(voiceCfg: VoicePluginConfig | undefined): {
   sttAvailable: boolean;
   ttsAvailable: boolean;
+  ttsProvider: 'openai' | 'cartesia' | null;
 } {
   const hasOpenAIKey = !!process.env.OPENAI_API_KEY;
+  const hasCartesiaKey = !!process.env.CARTESIA_API_KEY;
+
+  // Determine TTS provider (prefer config, then Cartesia if available, then OpenAI)
+  let ttsProvider: 'openai' | 'cartesia' | null = null;
+  if (voiceCfg?.tts?.provider === 'cartesia' && hasCartesiaKey) {
+    ttsProvider = 'cartesia';
+  } else if (voiceCfg?.tts?.provider === 'openai' && hasOpenAIKey) {
+    ttsProvider = 'openai';
+  } else if (hasCartesiaKey) {
+    ttsProvider = 'cartesia';
+  } else if (hasOpenAIKey) {
+    ttsProvider = 'openai';
+  }
+
   return {
     sttAvailable: !!(voiceCfg?.stt?.provider || hasOpenAIKey),
-    ttsAvailable: !!(voiceCfg?.tts?.provider || hasOpenAIKey),
+    ttsAvailable: ttsProvider !== null,
+    ttsProvider,
   };
 }
 
@@ -143,7 +208,13 @@ export async function handleVoiceCapabilities(ctx: HandlerContext): Promise<void
   }
 
   const voiceCfg = ctx.pluginCfg.voice;
-  const { sttAvailable, ttsAvailable } = resolveVoiceAvailability(voiceCfg);
+  const { sttAvailable, ttsAvailable, ttsProvider } = resolveVoiceAvailability(voiceCfg);
+
+  // Select voices based on provider
+  const ttsVoices = ttsProvider === 'cartesia' ? CARTESIA_TTS_VOICES : OPENAI_TTS_VOICES;
+  const defaultVoice = ttsProvider === 'cartesia'
+    ? (voiceCfg?.tts?.defaultVoice ?? 'sonic-english')
+    : (voiceCfg?.tts?.defaultVoice ?? 'nova');
 
   sendJson(ctx.res, 200, {
     stt: {
@@ -158,10 +229,10 @@ export async function handleVoiceCapabilities(ctx: HandlerContext): Promise<void
     tts: {
       available: ttsAvailable,
       ...(ttsAvailable && {
-        provider: voiceCfg?.tts?.provider ?? 'openai',
-        model: voiceCfg?.tts?.model ?? 'tts-1',
-        voices: TTS_VOICES,
-        defaultVoice: voiceCfg?.tts?.defaultVoice ?? 'nova',
+        provider: ttsProvider,
+        model: voiceCfg?.tts?.model ?? (ttsProvider === 'cartesia' ? 'sonic-english' : 'tts-1'),
+        voices: ttsVoices,
+        defaultVoice,
       }),
     },
   });
@@ -240,9 +311,9 @@ export async function handleVoiceSynthesize(ctx: HandlerContext): Promise<void> 
   }
 
   const voiceCfg = ctx.pluginCfg.voice;
-  const { ttsAvailable } = resolveVoiceAvailability(voiceCfg);
+  const { ttsAvailable, ttsProvider } = resolveVoiceAvailability(voiceCfg);
 
-  if (!ttsAvailable) {
+  if (!ttsAvailable || !ttsProvider) {
     sendJson(ctx.res, 503, { error: 'No TTS provider configured' });
     return;
   }
@@ -265,25 +336,29 @@ export async function handleVoiceSynthesize(ctx: HandlerContext): Promise<void> 
     return;
   }
 
-  const voice = body.voice ?? voiceCfg?.tts?.defaultVoice ?? 'nova';
+  // Select voices based on provider
+  const validVoices = ttsProvider === 'cartesia' ? CARTESIA_TTS_VOICES : OPENAI_TTS_VOICES;
+  const defaultVoice = ttsProvider === 'cartesia' ? 'sonic-english' : 'nova';
+  const voice = body.voice ?? voiceCfg?.tts?.defaultVoice ?? defaultVoice;
 
   // Validate voice against allowlist
-  if (!TTS_VOICES.includes(voice)) {
+  if (!validVoices.includes(voice)) {
     sendJson(ctx.res, 400, {
-      error: `Invalid voice "${voice}". Valid voices: ${TTS_VOICES.join(', ')}`,
+      error: `Invalid voice "${voice}". Valid voices: ${validVoices.join(', ')}`,
     });
     return;
   }
 
-  const model = voiceCfg?.tts?.model ?? 'tts-1';
+  const model = voiceCfg?.tts?.model ?? (ttsProvider === 'cartesia' ? 'sonic-english' : 'tts-1');
 
   try {
-    const audioBuffer = await synthesizeViaOpenAI(
-      body.text,
-      voice,
-      model,
-      body.speed,
-    );
+    let audioBuffer: Buffer;
+
+    if (ttsProvider === 'cartesia') {
+      audioBuffer = await synthesizeViaCartesia(body.text, voice, model);
+    } else {
+      audioBuffer = await synthesizeViaOpenAI(body.text, voice, model, body.speed);
+    }
 
     ctx.res.statusCode = 200;
     ctx.res.setHeader('Content-Type', 'audio/mpeg');

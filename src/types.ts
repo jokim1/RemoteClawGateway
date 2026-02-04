@@ -55,10 +55,23 @@ export interface VoicePluginConfig {
   };
 }
 
+export interface RealtimeVoicePluginConfig {
+  defaultProvider?: 'openai' | 'cartesia' | 'elevenlabs' | 'deepgram' | 'gemini';
+  openai?: {
+    model?: string;
+    voice?: string;
+  };
+  cartesia?: {
+    model?: string;
+    voice?: string;
+  };
+}
+
 export interface RemoteClawPluginConfig {
   proxyPort?: number;
   providers?: Record<string, ProviderBillingConfig>;
   voice?: VoicePluginConfig;
+  realtimeVoice?: RealtimeVoicePluginConfig;
   pairPassword?: string;
   externalUrl?: string;
   name?: string;

@@ -12,6 +12,10 @@ import {
   resolveVoiceAvailability,
 } from './voice.js';
 import { handleVoiceStreamUpgrade } from './voice-stream.js';
+import {
+  handleRealtimeVoiceCapabilities,
+  handleRealtimeVoiceStreamUpgrade,
+} from './realtime-voice.js';
 import { startProxy } from './proxy.js';
 
 const ROUTES = new Set([
@@ -22,6 +26,8 @@ const ROUTES = new Set([
   '/api/voice/transcribe',
   '/api/voice/synthesize',
   '/api/voice/stream',
+  '/api/realtime-voice/capabilities',
+  '/api/realtime-voice/stream',
 ]);
 
 // ============================================================================
@@ -225,6 +231,15 @@ const plugin = {
           return true;
         }
 
+        // WebSocket upgrade for realtime voice streaming
+        if (url.pathname === '/api/realtime-voice/stream') {
+          handleRealtimeVoiceStreamUpgrade(
+            req, res, api.logger,
+            pluginCfg.realtimeVoice,
+          );
+          return true;
+        }
+
         const ctx = { req, res, url, cfg, pluginCfg, logger: api.logger };
 
         switch (url.pathname) {
@@ -242,6 +257,9 @@ const plugin = {
             break;
           case '/api/voice/synthesize':
             await handleVoiceSynthesize(ctx);
+            break;
+          case '/api/realtime-voice/capabilities':
+            await handleRealtimeVoiceCapabilities(ctx);
             break;
         }
 
