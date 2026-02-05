@@ -67,16 +67,6 @@ export interface RealtimeVoicePluginConfig {
   };
 }
 
-export interface RemoteClawPluginConfig {
-  proxyPort?: number;
-  providers?: Record<string, ProviderBillingConfig>;
-  voice?: VoicePluginConfig;
-  realtimeVoice?: RealtimeVoicePluginConfig;
-  pairPassword?: string;
-  externalUrl?: string;
-  name?: string;
-}
-
 export interface UsageWindow {
   label: string;
   usedPercent: number;
@@ -107,6 +97,61 @@ export interface CachedRateLimitData {
   fiveHour?: RateLimitWindow;
   sevenDay?: RateLimitWindow;
   lastUpdated: number;
+}
+
+// ---------------------------------------------------------------------------
+// Talk types
+// ---------------------------------------------------------------------------
+
+export interface TalkMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp: number;
+  model?: string;
+}
+
+export interface TalkJob {
+  id: string;
+  schedule: string;
+  prompt: string;
+  active: boolean;
+  createdAt: number;
+  lastRunAt?: number;
+  lastStatus?: string;
+}
+
+export interface JobReport {
+  id: string;
+  jobId: string;
+  talkId: string;
+  runAt: number;
+  status: 'success' | 'error';
+  summary: string;
+  fullOutput: string;
+  tokenUsage?: { input: number; output: number };
+}
+
+export interface TalkMeta {
+  id: string;
+  topicTitle?: string;
+  objective?: string;
+  model?: string;
+  pinnedMessageIds: string[];
+  jobs: TalkJob[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface RemoteClawPluginConfig {
+  proxyPort?: number;
+  providers?: Record<string, ProviderBillingConfig>;
+  voice?: VoicePluginConfig;
+  realtimeVoice?: RealtimeVoicePluginConfig;
+  pairPassword?: string;
+  externalUrl?: string;
+  name?: string;
+  dataDir?: string;
 }
 
 export type { IncomingMessage, ServerResponse };

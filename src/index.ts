@@ -19,6 +19,10 @@ import {
   handleRealtimeVoiceStreamUpgrade,
 } from './realtime-voice.js';
 import { startProxy } from './proxy.js';
+import { TalkStore } from './talk-store.js';
+import { handleTalks } from './talks.js';
+import { handleTalkChat } from './talk-chat.js';
+import { startJobScheduler } from './job-scheduler.js';
 
 const ROUTES = new Set([
   '/api/pair',
@@ -125,6 +129,20 @@ const plugin = {
     // Eagerly warm up the usage loader in background
     warmUsageLoader(api.logger);
 
+    // Initialize Talk store
+    const talkStore = new TalkStore(pluginCfg.dataDir, api.logger);
+
+    // Start job scheduler
+    const cfg0 = api.runtime.config.loadConfig();
+    const gatewayToken0 = resolveGatewayToken(cfg0);
+    const gatewayOrigin0 = pluginCfg.externalUrl ?? 'http://localhost:18789';
+    const stopScheduler = startJobScheduler({
+      store: talkStore,
+      gatewayOrigin: gatewayOrigin0,
+      authToken: gatewayToken0,
+      logger: api.logger,
+    });
+
     // Log voice availability
     const { sttAvailable, ttsAvailable } = resolveVoiceAvailability(pluginCfg.voice);
     if (sttAvailable || ttsAvailable) {
@@ -138,7 +156,8 @@ const plugin = {
           `http://${req.headers.host ?? 'localhost'}`,
         );
 
-        if (!ROUTES.has(url.pathname)) return false;
+        const isTalkRoute = url.pathname === '/api/talks' || url.pathname.startsWith('/api/talks/');
+        if (!ROUTES.has(url.pathname) && !isTalkRoute) return false;
         if (handleCors(req, res)) return true;
 
         // =================================================================
@@ -245,6 +264,29 @@ const plugin = {
         }
 
         const ctx = { req, res, url, cfg, pluginCfg, logger: api.logger };
+
+        // Talk routes (dynamic path segments)
+        if (isTalkRoute) {
+          // POST /api/talks/:id/chat
+          const chatMatch = url.pathname.match(/^\/api\/talks\/([\w-]+)\/chat$/);
+          if (chatMatch) {
+            const host = req.headers.host ?? 'localhost:18789';
+            const gatewayOrigin = `http://${host}`;
+            const gatewayToken = resolveGatewayToken(cfg);
+            await handleTalkChat({
+              req, res,
+              talkId: chatMatch[1],
+              store: talkStore,
+              gatewayOrigin,
+              authToken: gatewayToken,
+              logger: api.logger,
+            });
+            return true;
+          }
+          // All other /api/talks/* CRUD routes
+          await handleTalks(ctx, talkStore);
+          return true;
+        }
 
         switch (url.pathname) {
           case '/api/providers':

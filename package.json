@@ -6,12 +6,23 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "jest"
   },
   "moltbot": {
-    "extensions": ["./dist/index.js"]
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
-  "keywords": ["moltbot", "remoteclaw", "gateway", "plugin", "voice", "tts", "stt"],
+  "keywords": [
+    "moltbot",
+    "remoteclaw",
+    "gateway",
+    "plugin",
+    "voice",
+    "tts",
+    "stt"
+  ],
   "author": "Joseph Kim",
   "license": "MIT",
   "dependencies": {
@@ -20,8 +31,11 @@
   },
   "devDependencies": {
     "@types/busboy": "^1.5.0",
-    "@types/ws": "^8.5.0",
+    "@types/jest": "^30.0.0",
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "jest": "^30.2.0",
+    "ts-jest": "^29.4.6",
     "typescript": "^5.6.0"
   },
   "engines": {

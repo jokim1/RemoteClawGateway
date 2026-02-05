@@ -61,6 +61,10 @@
       },
       "name": {
         "type": "string"
+      },
+      "dataDir": {
+        "type": "string",
+        "description": "Directory for persistent Talk data (default: ~/.moltbot/plugins/remoteclaw)"
       }
     }
   },
