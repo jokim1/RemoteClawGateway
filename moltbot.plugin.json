@@ -65,6 +65,32 @@
       "dataDir": {
         "type": "string",
         "description": "Directory for persistent Talk data (default: ~/.moltbot/plugins/remoteclaw)"
+      },
+      "realtimeVoice": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "defaultProvider": {
+            "type": "string",
+            "enum": ["openai", "cartesia", "elevenlabs", "deepgram", "gemini"]
+          },
+          "openai": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "model": { "type": "string" },
+              "voice": { "type": "string" }
+            }
+          },
+          "cartesia": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "model": { "type": "string" },
+              "voice": { "type": "string" }
+            }
+          }
+        }
       }
     }
   },
@@ -88,6 +114,10 @@
     "name": {
       "label": "Gateway Name",
       "help": "Friendly name for this gateway, returned during pairing."
+    },
+    "realtimeVoice": {
+      "label": "Realtime Voice Config",
+      "help": "Default provider and per-provider model/voice settings for real-time voice streaming."
     }
   }
 }
