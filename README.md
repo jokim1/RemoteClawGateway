@@ -14,10 +14,10 @@ This plugin runs on your server alongside OpenClaw. It adds HTTP endpoints that 
 - **`/api/talks/:id/chat`** — talk-aware chat with context injection and system prompts
 - **`/api/talks/:id/jobs`** — scheduled jobs (cron-based recurring prompts)
 - **`/api/voice/capabilities`** — reports whether speech-to-text and text-to-speech are available
-- **`/api/voice/transcribe`** — accepts audio, returns transcribed text (via OpenAI Whisper)
-- **`/api/voice/synthesize`** — accepts text, returns spoken audio (via OpenAI TTS)
+- **`/api/voice/transcribe`** — accepts audio, returns transcribed text (OpenAI Whisper, Deepgram, or Groq)
+- **`/api/voice/synthesize`** — accepts text, returns spoken audio (OpenAI TTS, Cartesia, or ElevenLabs)
 - **`/api/voice/stream`** — WebSocket endpoint for live voice mode
-- **`/api/realtime-voice/stream`** — real-time voice conversation (OpenAI, Cartesia, ElevenLabs, Deepgram, Gemini)
+- **`/api/realtime-voice/stream`** — real-time voice conversation (OpenAI, Cartesia+Deepgram, ElevenLabs, Gemini)
 - **`/api/pair`** — lets ClawTalkMobile auto-configure by exchanging a pairing password for the full gateway config (disabled by default)
 
 ## Setup
@@ -64,15 +64,42 @@ clawtalk config --gateway http://your-server:18789 --token pick-a-strong-random-
 
 ### Step 3: Enable voice (optional)
 
-Voice features require an OpenAI API key on the server for Whisper (STT) and TTS:
+Voice features are auto-detected from environment variables. Set the API keys for the providers you want to use:
+
+**Speech-to-text (STT):**
+
+| Provider | Env var | Notes |
+|----------|---------|-------|
+| OpenAI Whisper | `OPENAI_API_KEY` | Default STT provider |
+| Deepgram | `DEEPGRAM_API_KEY` | Alternative STT |
+| Groq | `GROQ_API_KEY` | Alternative STT |
+
+**Text-to-speech (TTS):**
+
+| Provider | Env var | Notes |
+|----------|---------|-------|
+| OpenAI TTS | `OPENAI_API_KEY` | Default TTS provider |
+| Cartesia | `CARTESIA_API_KEY` | Alternative TTS |
+| ElevenLabs | `ELEVENLABS_API_KEY` | Alternative TTS |
+
+**Real-time voice (live conversation):**
+
+| Provider | Env var(s) | Notes |
+|----------|------------|-------|
+| OpenAI | `OPENAI_API_KEY` | Default realtime provider |
+| Cartesia + Deepgram | `CARTESIA_API_KEY` + `DEEPGRAM_API_KEY` | Both required |
+| ElevenLabs | `ELEVENLABS_API_KEY` + `ELEVENLABS_AGENT_ID` | Both required |
+| Gemini | `GOOGLE_API_KEY` or `GEMINI_API_KEY` | |
+
+At minimum, set `OPENAI_API_KEY` to get basic voice working:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
 ```
 
-That's it. The plugin auto-detects the key and enables voice endpoints. ClawTalk will discover voice support automatically.
+The plugin auto-detects which keys are present and enables the corresponding providers. ClawTalk discovers voice support automatically.
 
-You can customize the voice models in your OpenClaw plugin config:
+You can customize the default voice models in your OpenClaw plugin config:
 
 ```yaml
 plugins:
@@ -260,7 +287,9 @@ Token comparison uses timing-safe equality to prevent timing attacks.
 
 - **Node.js 20+**
 - **OpenClaw** running on the same machine
-- **`OPENAI_API_KEY`** environment variable (only needed for voice features)
+- **LLM provider API keys** — set on the server as env vars. The plugin auto-detects which are present:
+  - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `GOOGLE_API_KEY`
+- **Voice API keys** (optional) — see [Step 3: Enable voice](#step-3-enable-voice-optional) for the full list
 
 ## Related projects
 

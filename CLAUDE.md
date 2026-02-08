@@ -1,19 +1,27 @@
-# RemoteClawGateway
+# ClawTalkGateway
 
-Moltbot plugin that adds HTTP endpoints for RemoteClaw (terminal client) and ClawTalk (iOS app). Provides provider discovery, rate-limit tracking, voice I/O, and mobile pairing. API keys stay on the server.
+OpenClaw plugin that adds HTTP endpoints for ClawTalk (terminal client) and ClawTalkMobile (iOS app). Provides provider discovery, rate-limit tracking, voice I/O, Talks (persistent conversations), scheduled jobs, and mobile pairing. API keys stay on the server.
 
 ## Source Files
 
 ```
 src/
-  index.ts        Plugin entry, route dispatch, rate limiter, pairing handler, Tailscale detection
-  types.ts        TypeScript interfaces (PluginApi, RemoteClawPluginConfig, HandlerContext, etc.)
-  http.ts         Utilities: sendJson(), readJsonBody(), handleCors()
-  auth.ts         Bearer token auth, localhost fallback, timing-safe compare, resolveGatewayToken()
-  providers.ts    GET /api/providers — auto-detect configured LLM providers + billing overrides
-  rate-limits.ts  GET /api/rate-limits — usage from moltbot internals or proxy-captured headers
-  proxy.ts        HTTP proxy on port 18793 capturing Anthropic rate-limit headers
-  voice.ts        Voice endpoints: capabilities, transcribe (Whisper), synthesize (OpenAI TTS)
+  index.ts            Plugin entry, route dispatch, rate limiter, pairing handler, Tailscale detection
+  types.ts            TypeScript interfaces (PluginApi, RemoteClawPluginConfig, HandlerContext, etc.)
+  http.ts             Utilities: sendJson(), readJsonBody(), handleCors()
+  auth.ts             Bearer token auth, localhost fallback, timing-safe compare, resolveGatewayToken()
+  providers.ts        GET /api/providers — auto-detect configured LLM providers + billing overrides
+  rate-limits.ts      GET /api/rate-limits — usage from OpenClaw internals or proxy-captured headers
+  proxy.ts            HTTP proxy on port 18793 capturing Anthropic rate-limit headers
+  voice.ts            Voice endpoints: capabilities, transcribe (multi-provider STT), synthesize (multi-provider TTS)
+  voice-stream.ts     WebSocket live voice streaming
+  realtime-voice.ts   Real-time voice conversation (OpenAI, Cartesia+Deepgram, ElevenLabs, Gemini)
+  talks.ts            Talks route handler — CRUD, messages, pins, jobs
+  talk-store.ts       File-based persistent storage for Talks (~/.moltbot/plugins/remoteclaw/)
+  talk-chat.ts        Talk-aware chat with context injection and system prompts
+  system-prompt.ts    Composes system prompts from Talk metadata, context, pins, and jobs
+  context-updater.ts  Updates Talk context markdown after new messages
+  job-scheduler.ts    Cron-based job scheduler — checks every 60s, runs due jobs with full Talk context
 ```
 
 ## Routes
@@ -26,6 +34,25 @@ src/
 | GET | `/api/voice/capabilities` | Bearer token | voice.ts |
 | POST | `/api/voice/transcribe` | Bearer token | voice.ts |
 | POST | `/api/voice/synthesize` | Bearer token | voice.ts |
+| POST | `/api/voice/stt/provider` | Bearer token | voice.ts |
+| POST | `/api/voice/tts/provider` | Bearer token | voice.ts |
+| GET | `/api/voice/stream` | Bearer token | voice-stream.ts |
+| GET | `/api/realtime-voice/capabilities` | Bearer token | realtime-voice.ts |
+| GET | `/api/realtime-voice/stream` | Bearer token | realtime-voice.ts |
+| POST | `/api/talks` | Bearer token | talks.ts |
+| GET | `/api/talks` | Bearer token | talks.ts |
+| GET | `/api/talks/:id` | Bearer token | talks.ts |
+| PATCH | `/api/talks/:id` | Bearer token | talks.ts |
+| DELETE | `/api/talks/:id` | Bearer token | talks.ts |
+| GET | `/api/talks/:id/messages` | Bearer token | talks.ts |
+| POST | `/api/talks/:id/chat` | Bearer token | talk-chat.ts |
+| POST | `/api/talks/:id/pin` | Bearer token | talks.ts |
+| DELETE | `/api/talks/:id/pin/:msgId` | Bearer token | talks.ts |
+| POST | `/api/talks/:id/jobs` | Bearer token | talks.ts |
+| GET | `/api/talks/:id/jobs` | Bearer token | talks.ts |
+| PATCH | `/api/talks/:id/jobs/:jobId` | Bearer token | talks.ts |
+| DELETE | `/api/talks/:id/jobs/:jobId` | Bearer token | talks.ts |
+| GET | `/api/talks/:id/reports` | Bearer token | talks.ts |
 
 ## Auth
 
@@ -37,7 +64,7 @@ src/
 
 Disabled by default. Enabled when `pairPassword` is set (config or `CLAWDBOT_PAIR_PASSWORD` env var).
 
-Flow: ClawTalk sends `POST /api/pair` with `{"password":"..."}` → gateway returns `{name, gatewayURL, port, authToken, agentID}`.
+Flow: ClawTalkMobile sends `POST /api/pair` with `{"password":"..."}` → gateway returns `{name, gatewayURL, port, authToken, agentID}`.
 
 - Rate limited: 5 attempts per IP per 60s, cleanup every 5 min
 - Timing-safe password comparison
@@ -69,20 +96,22 @@ plugins:
 npm install
 npm run build    # tsc → dist/
 npm run dev      # tsc --watch
+npm test         # run tests
 ```
 
-Requires Node 20+. Voice features require `OPENAI_API_KEY`.
+Requires Node 20+. Voice features require at minimum `OPENAI_API_KEY`.
 
 ## Key Patterns
 
 - Plugin registers via `api.registerHttpHandler()` returning `boolean` (true = handled)
 - Handler context (`HandlerContext`) bundles req/res/url/cfg/pluginCfg/logger
-- Rate-limit data: tries moltbot's internal `loadProviderUsageSummary()` (dynamic import), falls back to proxy-captured Anthropic headers
+- Rate-limit data: tries OpenClaw's internal `loadProviderUsageSummary()` (dynamic import), falls back to proxy-captured Anthropic headers
 - Proxy runs as singleton with hot-reload guard to prevent double-binding
 - All intervals use `.unref()` to avoid blocking process exit
+- Talk data stored as flat files under `~/.moltbot/plugins/remoteclaw/talks/<id>/`
 
 ## Related Projects
 
-- **ClawTalk** — iOS client that connects to these endpoints
-- **RemoteClaw** — Terminal TUI client
-- **Moltbot** — The host server this plugin extends
+- **ClawTalk** — Terminal TUI client
+- **ClawTalkMobile** — iOS client
+- **OpenClaw** — The host server this plugin extends
