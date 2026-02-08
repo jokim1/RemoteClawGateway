@@ -122,7 +122,11 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     messages.push({ role: 'system', content: systemPrompt });
   }
   for (const m of history) {
-    messages.push({ role: m.role, content: m.content });
+    let content = m.content;
+    if (m.agentName && m.role === 'assistant') {
+      content = `[${m.agentName}]: ${content}`;
+    }
+    messages.push({ role: m.role, content });
   }
 
   // Build user message content (multimodal when image attached)
