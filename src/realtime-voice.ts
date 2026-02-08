@@ -87,7 +87,7 @@ function upsampleTo24kHz(input: Buffer): Buffer {
 
 // Provider-specific voices
 const PROVIDER_VOICES: Record<RealtimeVoiceProvider, string[]> = {
-  openai: ['alloy', 'echo', 'shimmer', 'ash', 'ballad', 'coral', 'sage', 'verse'],
+  openai: ['alloy', 'ash', 'ballad', 'coral', 'echo', 'marin', 'sage', 'shimmer', 'verse'],
   cartesia: ['sonic-english', 'sonic-multilingual'],
   elevenlabs: ['rachel', 'drew', 'clyde', 'paul', 'domi', 'dave', 'fin', 'sarah'],
   deepgram: ['aura-asteria-en', 'aura-luna-en', 'aura-stella-en', 'aura-athena-en', 'aura-hera-en', 'aura-orion-en', 'aura-arcas-en', 'aura-perseus-en', 'aura-angus-en', 'aura-orpheus-en', 'aura-helios-en', 'aura-zeus-en'],
@@ -248,65 +248,113 @@ async function connectToOpenAI(
   }
 
   try {
-    // OpenAI Realtime API WebSocket — GA model
+    // OpenAI Realtime API WebSocket — GA model (no Beta header)
     const openaiWs = new WebSocket(
-      'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2025-06-03',
+      'wss://api.openai.com/v1/realtime?model=gpt-realtime',
       {
         headers: {
           'Authorization': `Bearer ${apiKey}`,
-          'OpenAI-Beta': 'realtime=v1',
         },
       }
     );
 
     return new Promise((resolve) => {
+      let resolved = false;
+      const safeResolve = (value: ProviderSession | null) => {
+        if (!resolved) {
+          resolved = true;
+          resolve(value);
+        }
+      };
+
       const timeout = setTimeout(() => {
         openaiWs.close();
         sendJsonMsg(clientWs, { type: 'error', message: 'OpenAI connection timeout' });
-        resolve(null);
+        safeResolve(null);
       }, 10000);
 
       openaiWs.on('open', () => {
-        clearTimeout(timeout);
-        logger.info('RealtimeVoice: connected to OpenAI Realtime');
+        logger.info('RealtimeVoice: connected to OpenAI Realtime (GA)');
 
-        // Send session update with voice and system prompt
+        // GA session.update format — restructured audio config
         const sessionUpdate = {
           type: 'session.update',
           session: {
-            modalities: ['text', 'audio'],
-            voice: voice || 'alloy',
-            input_audio_format: 'pcm16',
-            output_audio_format: 'pcm16',
-            input_audio_transcription: {
-              model: 'whisper-1',
-            },
-            turn_detection: {
-              type: 'server_vad',
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 500,
-            },
+            type: 'realtime',
+            model: 'gpt-realtime',
             instructions: systemPrompt || 'You are a helpful voice assistant. Keep responses concise.',
+            output_modalities: ['text', 'audio'],
+            audio: {
+              input: {
+                format: { type: 'audio/pcm', rate: SAMPLE_RATE },
+                turn_detection: {
+                  type: 'server_vad',
+                  threshold: 0.5,
+                  prefix_padding_ms: 300,
+                  silence_duration_ms: 500,
+                  create_response: true,
+                  interrupt_response: true,
+                },
+                transcription: {
+                  model: 'gpt-4o-transcribe',
+                },
+              },
+              output: {
+                format: { type: 'audio/pcm', rate: SAMPLE_RATE },
+                voice: voice || 'alloy',
+              },
+            },
           },
         };
         openaiWs.send(JSON.stringify(sessionUpdate));
+        logger.info('RealtimeVoice: sent GA session.update');
+      });
 
-        const session: ProviderSession = {
-          provider: 'openai',
-          ws: openaiWs,
-          voice: voice || 'alloy',
-          systemPrompt,
-        };
-
-        resolve(session);
+      // Wait for session.created before resolving — ensures OpenAI is ready
+      openaiWs.on('message', function onSetupMessage(data: Buffer | string) {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.type === 'session.created') {
+            clearTimeout(timeout);
+            logger.info('RealtimeVoice: OpenAI session created');
+            // Remove this setup listener — main handler will take over
+            openaiWs.removeListener('message', onSetupMessage);
+            const session: ProviderSession = {
+              provider: 'openai',
+              ws: openaiWs,
+              voice: voice || 'alloy',
+              systemPrompt,
+            };
+            safeResolve(session);
+          } else if (msg.type === 'error') {
+            clearTimeout(timeout);
+            const errMsg = msg.error?.message || 'OpenAI session error';
+            logger.error(`RealtimeVoice: OpenAI setup error: ${errMsg}`);
+            sendJsonMsg(clientWs, { type: 'error', message: errMsg });
+            openaiWs.close();
+            safeResolve(null);
+          }
+        } catch {
+          // Ignore parse errors during setup
+        }
       });
 
       openaiWs.on('error', (err) => {
         clearTimeout(timeout);
         logger.error(`RealtimeVoice: OpenAI error: ${err.message}`);
         sendJsonMsg(clientWs, { type: 'error', message: `OpenAI error: ${err.message}` });
-        resolve(null);
+        safeResolve(null);
+      });
+
+      openaiWs.on('close', (code, reason) => {
+        clearTimeout(timeout);
+        const reasonStr = reason?.toString() || '';
+        logger.error(`RealtimeVoice: OpenAI closed during setup (code=${code}, reason=${reasonStr})`);
+        sendJsonMsg(clientWs, {
+          type: 'error',
+          message: `OpenAI rejected connection (code=${code}${reasonStr ? `, ${reasonStr}` : ''})`,
+        });
+        safeResolve(null);
       });
     });
   } catch (err) {
@@ -338,24 +386,27 @@ function createOpenAIMessageHandler(clientWs: WebSocket, logger: Logger) {
       const msg = JSON.parse(data);
 
       switch (msg.type) {
+        // Session lifecycle (same in Beta and GA)
         case 'session.created':
           logger.info('RealtimeVoice: OpenAI session created');
           sendJsonMsg(clientWs, { type: 'session.start' });
           break;
 
         case 'session.updated':
-          logger.debug?.('RealtimeVoice: OpenAI session updated');
+          logger.info('RealtimeVoice: OpenAI session updated — ready for audio');
           break;
 
+        // Audio output — handle both GA and Beta event names
+        case 'response.output_audio.delta':
         case 'response.audio.delta':
-          // Forward audio to client (already base64 PCM 24kHz 16-bit mono)
           if (msg.delta) {
             sendJsonMsg(clientWs, { type: 'audio', data: msg.delta });
           }
           break;
 
+        // AI transcript streaming — handle both GA and Beta event names
+        case 'response.output_audio_transcript.delta':
         case 'response.audio_transcript.delta':
-          // AI transcript update - accumulate for streaming display
           accumulatedAITranscript += msg.delta || '';
           sendJsonMsg(clientWs, {
             type: 'transcript.ai',
@@ -364,8 +415,9 @@ function createOpenAIMessageHandler(clientWs: WebSocket, logger: Logger) {
           });
           break;
 
+        // AI transcript final — handle both GA and Beta event names
+        case 'response.output_audio_transcript.done':
         case 'response.audio_transcript.done':
-          // Final AI transcript
           sendJsonMsg(clientWs, {
             type: 'transcript.ai',
             text: msg.transcript || accumulatedAITranscript,
@@ -374,8 +426,8 @@ function createOpenAIMessageHandler(clientWs: WebSocket, logger: Logger) {
           accumulatedAITranscript = '';
           break;
 
+        // User transcript (unchanged between Beta and GA)
         case 'conversation.item.input_audio_transcription.completed':
-          // User transcript (final)
           sendJsonMsg(clientWs, {
             type: 'transcript.user',
             text: msg.transcript || '',
@@ -383,28 +435,25 @@ function createOpenAIMessageHandler(clientWs: WebSocket, logger: Logger) {
           });
           break;
 
+        // VAD events (unchanged)
         case 'input_audio_buffer.speech_started':
-          // User started speaking - could send state update
           logger.debug?.('RealtimeVoice: User speech started');
           break;
 
         case 'input_audio_buffer.speech_stopped':
-          // User stopped speaking
           logger.debug?.('RealtimeVoice: User speech stopped');
           break;
 
+        // Response lifecycle (unchanged)
         case 'response.created':
-          // AI is about to respond
           accumulatedAITranscript = '';
           break;
 
         case 'response.done':
-          // AI response complete
           logger.debug?.('RealtimeVoice: Response complete');
           break;
 
         case 'response.cancelled':
-          // Response was cancelled (barge-in)
           logger.info('RealtimeVoice: Response cancelled (barge-in)');
           accumulatedAITranscript = '';
           break;
@@ -418,7 +467,6 @@ function createOpenAIMessageHandler(clientWs: WebSocket, logger: Logger) {
           break;
 
         default:
-          // Log unknown events for debugging
           logger.debug?.(`RealtimeVoice: Unhandled OpenAI event: ${msg.type}`);
       }
     } catch (err) {
