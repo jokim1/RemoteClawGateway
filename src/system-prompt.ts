@@ -56,7 +56,11 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
     'Name            Score   Result\n' +
     'Alice             95   Passed\n' +
     'Bob               82   Passed\n' +
-    '```',
+    '```\n\n' +
+    '## Honesty\n' +
+    'Do not speculate about or fabricate system internals, configuration entries, ' +
+    'session identifiers, or infrastructure details you do not actually have access to. ' +
+    'If you do not know how something works internally, say so rather than guessing.',
   );
 
   // Objective
