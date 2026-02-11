@@ -58,6 +58,41 @@ export function startJobScheduler(opts: JobSchedulerOptions): () => void {
 // ---------------------------------------------------------------------------
 
 /**
+ * Parse a one-off schedule ("in Xh", "in Xm", "at 3pm", "at 14:00")
+ * into a target timestamp. Returns null if not a one-off format.
+ */
+export function parseOneOff(schedule: string, createdAt: number): number | null {
+  // "in Xh", "in X hours", "in Xm", "in X minutes"
+  const inMatch = schedule.match(/^in\s+(\d+)\s*(m|min|mins|minutes?|h|hr|hrs|hours?)$/i);
+  if (inMatch) {
+    const value = parseInt(inMatch[1], 10);
+    const unit = inMatch[2].toLowerCase();
+    const delayMs = unit.startsWith('h') ? value * 3_600_000 : value * 60_000;
+    return createdAt + delayMs;
+  }
+
+  // "at 3pm", "at 14:00", "at 3:30pm"
+  const atMatch = schedule.match(/^at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
+  if (atMatch) {
+    let hour = parseInt(atMatch[1], 10);
+    const minute = parseInt(atMatch[2] ?? '0', 10);
+    const ampm = atMatch[3]?.toLowerCase();
+    if (ampm === 'pm' && hour < 12) hour += 12;
+    if (ampm === 'am' && hour === 12) hour = 0;
+
+    const now = new Date();
+    const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
+    // If the target time has already passed today, schedule for tomorrow
+    if (target.getTime() <= now.getTime()) {
+      target.setDate(target.getDate() + 1);
+    }
+    return target.getTime();
+  }
+
+  return null;
+}
+
+/**
  * Parse a human-readable schedule into a millisecond interval.
  * Returns null if the schedule can't be parsed as a simple interval.
  */
@@ -81,6 +116,12 @@ export function isJobDue(job: TalkJob): boolean {
   if (!job.active) return false;
 
   const now = Date.now();
+
+  // One-off schedules: "in 1h", "at 3pm"
+  const oneOffTarget = parseOneOff(job.schedule, job.createdAt);
+  if (oneOffTarget !== null) {
+    return now >= oneOffTarget && !job.lastRunAt;
+  }
 
   // Simple interval schedules: "every Xh", "every Xm"
   const intervalMs = parseIntervalMs(job.schedule);
@@ -288,7 +329,13 @@ Provide a concise report of your findings or actions. Start with a one-line summ
     await store.appendReport(talkId, report);
     store.updateJob(talkId, job.id, { lastRunAt: runAt, lastStatus: 'success' });
 
-    logger.info(`JobScheduler: job ${job.id} completed — "${summary}"`);
+    // Auto-deactivate one-off jobs after execution
+    if (job.type === 'once') {
+      store.updateJob(talkId, job.id, { active: false });
+      logger.info(`JobScheduler: one-off job ${job.id} completed and deactivated — "${summary}"`);
+    } else {
+      logger.info(`JobScheduler: job ${job.id} completed — "${summary}"`);
+    }
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     logger.warn(`JobScheduler: job ${job.id} failed: ${errorMsg}`);

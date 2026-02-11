@@ -133,6 +133,7 @@ export interface TalkMessage {
 
 export interface TalkJob {
   id: string;
+  type?: 'once' | 'recurring';  // default 'recurring' for backwards compat
   schedule: string;
   prompt: string;
   active: boolean;

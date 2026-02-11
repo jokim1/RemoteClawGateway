@@ -223,12 +223,13 @@ export class TalkStore {
   // Job management
   // -------------------------------------------------------------------------
 
-  addJob(talkId: string, schedule: string, prompt: string): TalkJob | null {
+  addJob(talkId: string, schedule: string, prompt: string, type?: 'once' | 'recurring'): TalkJob | null {
     const meta = this.talks.get(talkId);
     if (!meta) return null;
 
     const job: TalkJob = {
       id: randomUUID(),
+      type: type ?? 'recurring',
       schedule,
       prompt,
       active: true,
@@ -362,8 +363,11 @@ export class TalkStore {
     return reports;
   }
 
-  async getRecentReports(talkId: string, limit: number, jobId?: string): Promise<JobReport[]> {
-    const all = await this.getReports(talkId, jobId);
+  async getRecentReports(talkId: string, limit: number, jobId?: string, since?: number): Promise<JobReport[]> {
+    let all = await this.getReports(talkId, jobId);
+    if (since) {
+      all = all.filter(r => r.runAt > since);
+    }
     return all.slice(-limit);
   }
 

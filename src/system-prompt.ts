@@ -126,10 +126,15 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
     `prompt: <self-contained instruction for each run>\n` +
     '```\n\n' +
     `Schedule formats:\n` +
-    '- Cron: `0 8 * * *` (daily 8 AM), `0 9 * * 1` (Monday 9 AM), `30 17 * * 1-5` (weekdays 5:30 PM)\n' +
-    '- Human-readable: `daily 8am`, `every 2h`, `every 30m`\n\n' +
+    '- One-off: `in 1h`, `in 30m`, `at 3pm`, `at 14:00` (runs once, then deactivates)\n' +
+    '- Interval: `every 2h`, `every 30m` (recurring)\n' +
+    '- Daily: `daily 8am`, `daily 14:00` (recurring)\n' +
+    '- Cron: `0 8 * * *` (daily 8 AM), `0 9 * * 1` (Monday 9 AM), `30 17 * * 1-5` (weekdays 5:30 PM)\n\n' +
+    `One-off jobs run once at the specified time, then auto-deactivate. ` +
+    `When you promise to follow up later (e.g. "I'll research this and have it for you in an hour"), ` +
+    `create a one-off job to ensure you deliver.\n\n` +
     `The prompt must be self-contained — it runs independently with only the Talk context. ` +
-    `Only create jobs when the user explicitly asks for something recurring or scheduled.\n\n` +
+    `Create jobs when the user asks for something recurring, scheduled, or when you commit to a follow-up.\n\n` +
     `### Moving External Tasks to Talk Jobs\n` +
     `If the user asks to move an external cron job, scheduled task, or recurring reminder ` +
     `into this Talk, create a Talk job for it. Talk jobs are the preferred way to handle ` +

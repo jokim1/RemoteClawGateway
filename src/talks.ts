@@ -320,7 +320,9 @@ async function handleGetReports(ctx: HandlerContext, store: TalkStore, talkId: s
   }
 
   const limit = parseInt(ctx.url.searchParams.get('limit') ?? '20', 10);
-  const reports = await store.getRecentReports(talkId, limit, jobId);
+  const sinceParam = ctx.url.searchParams.get('since');
+  const since = sinceParam ? parseInt(sinceParam, 10) : undefined;
+  const reports = await store.getRecentReports(talkId, limit, jobId, since);
   sendJson(ctx.res, 200, { reports });
 }
 
