@@ -157,6 +157,11 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
                   if (tc.function?.name) acc.function.name += tc.function.name;
                   if (tc.function?.arguments) acc.function.arguments += tc.function.arguments;
                 }
+                // Send SSE comment as keepalive while accumulating tool call
+                // arguments. Without this, the client sees no data during long
+                // tool-argument generation (e.g. writing a large document) and
+                // its inactivity timer fires.
+                res.write(': keepalive\n\n');
               }
 
               // Capture finish reason
