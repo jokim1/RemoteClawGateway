@@ -7,6 +7,7 @@
 
 import type { HandlerContext } from './types.js';
 import type { TalkStore } from './talk-store.js';
+import type { ToolRegistry } from './tool-registry.js';
 import { sendJson, readJsonBody } from './http.js';
 
 /**
@@ -384,4 +385,62 @@ async function handleDeleteAgent(ctx: HandlerContext, store: TalkStore, talkId: 
     return;
   }
   sendJson(ctx.res, 200, { ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Tool handlers
+// ---------------------------------------------------------------------------
+
+/**
+ * Route /api/tools requests for managing the tool registry.
+ */
+export async function handleToolRoutes(ctx: HandlerContext, registry: ToolRegistry): Promise<void> {
+  const { req, res, url } = ctx;
+  const pathname = url.pathname;
+
+  // GET /api/tools — list all tools
+  if (pathname === '/api/tools' && req.method === 'GET') {
+    sendJson(res, 200, { tools: registry.listTools() });
+    return;
+  }
+
+  // POST /api/tools — register a new tool
+  if (pathname === '/api/tools' && req.method === 'POST') {
+    let body: { name?: string; description?: string; parameters?: any };
+    try {
+      body = (await readJsonBody(req)) as typeof body;
+    } catch {
+      sendJson(res, 400, { error: 'Invalid JSON body' });
+      return;
+    }
+
+    if (!body.name || !body.description) {
+      sendJson(res, 400, { error: 'Missing name or description' });
+      return;
+    }
+
+    const parameters = body.parameters ?? { type: 'object', properties: {} };
+    const ok = registry.registerTool(body.name, body.description, parameters);
+    if (!ok) {
+      sendJson(res, 409, { error: `Cannot register tool "${body.name}" (name conflicts with built-in)` });
+      return;
+    }
+    sendJson(res, 201, { ok: true, name: body.name });
+    return;
+  }
+
+  // DELETE /api/tools/:name — remove a dynamic tool
+  const toolNameMatch = pathname.match(/^\/api\/tools\/([\w-]+)$/);
+  if (toolNameMatch && req.method === 'DELETE') {
+    const name = toolNameMatch[1];
+    const ok = registry.removeTool(name);
+    if (!ok) {
+      sendJson(res, 404, { error: `Tool "${name}" not found or is built-in` });
+      return;
+    }
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  sendJson(res, 404, { error: 'Not found' });
 }

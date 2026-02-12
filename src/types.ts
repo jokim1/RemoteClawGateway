@@ -120,15 +120,29 @@ export interface ImageAttachmentMeta {
   sizeBytes: number;
 }
 
+export interface ToolCallFunction {
+  name: string;
+  arguments: string;
+}
+
+export interface ToolCallInfo {
+  id: string;
+  type: 'function';
+  function: ToolCallFunction;
+}
+
 export interface TalkMessage {
   id: string;
-  role: 'user' | 'assistant' | 'system';
+  role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
   timestamp: number;
   model?: string;
   agentName?: string;
   agentRole?: AgentRole;
   attachment?: ImageAttachmentMeta;
+  tool_calls?: ToolCallInfo[];
+  tool_call_id?: string;
+  tool_name?: string;
 }
 
 export interface TalkJob {

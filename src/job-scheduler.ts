@@ -14,7 +14,10 @@
 import { randomUUID } from 'node:crypto';
 import type { TalkStore } from './talk-store.js';
 import type { TalkJob, JobReport, Logger } from './types.js';
+import type { ToolRegistry } from './tool-registry.js';
+import type { ToolExecutor } from './tool-executor.js';
 import { composeSystemPrompt } from './system-prompt.js';
+import { runToolLoopNonStreaming } from './tool-loop.js';
 
 /** How often the scheduler checks for due jobs. */
 const CHECK_INTERVAL_MS = 60_000; // 1 minute
@@ -30,6 +33,8 @@ export interface JobSchedulerOptions {
   gatewayOrigin: string;
   authToken: string | undefined;
   logger: Logger;
+  registry: ToolRegistry;
+  executor: ToolExecutor;
 }
 
 /**
@@ -241,7 +246,7 @@ async function executeJob(
   talkId: string,
   job: TalkJob,
 ): Promise<void> {
-  const { store, gatewayOrigin, authToken, logger } = opts;
+  const { store, gatewayOrigin, authToken, logger, registry, executor } = opts;
   const runAt = Date.now();
 
   logger.info(`JobScheduler: executing job ${job.id} for talk ${talkId}: "${job.prompt}"`);
@@ -263,6 +268,7 @@ async function executeJob(
       meta,
       contextMd,
       pinnedMessages: pinnedMessages.filter(Boolean) as any[],
+      registry,
     });
 
     // Build the job execution prompt
@@ -271,6 +277,7 @@ async function executeJob(
 Job schedule: ${job.schedule}
 Job task: ${job.prompt}
 
+You have tools available — use them if the task requires actions (file ops, web requests, etc.).
 Provide a concise report of your findings or actions. Start with a one-line summary, then provide details if needed. Be direct and actionable.`;
 
     const messages: Array<{ role: string; content: string }> = [];
@@ -279,37 +286,22 @@ Provide a concise report of your findings or actions. Start with a one-line summ
     }
     messages.push({ role: 'user', content: jobPrompt });
 
-    // Call LLM
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    if (authToken) {
-      headers['Authorization'] = `Bearer ${authToken}`;
-    }
-
+    // Run the tool loop (non-streaming for background jobs)
     const model = meta.model ?? 'moltbot';
-    const response = await fetch(`${gatewayOrigin}/v1/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model,
-        messages,
-        stream: false,
-      }),
-      signal: AbortSignal.timeout(JOB_TIMEOUT_MS),
+    const tools = registry.getToolSchemas();
+
+    const result = await runToolLoopNonStreaming({
+      messages,
+      model,
+      tools,
+      gatewayOrigin,
+      authToken,
+      executor,
+      logger,
+      timeoutMs: JOB_TIMEOUT_MS,
     });
 
-    if (!response.ok) {
-      const errBody = await response.text().catch(() => '');
-      throw new Error(`LLM call failed (${response.status}): ${errBody.slice(0, 200)}`);
-    }
-
-    const json = await response.json() as {
-      choices?: Array<{ message?: { content?: string } }>;
-      usage?: { prompt_tokens?: number; completion_tokens?: number };
-    };
-
-    const fullOutput = json.choices?.[0]?.message?.content?.trim() ?? '';
+    const fullOutput = result.fullContent.trim();
     const summary = fullOutput.split('\n')[0].slice(0, 200);
 
     const report: JobReport = {
@@ -320,9 +312,9 @@ Provide a concise report of your findings or actions. Start with a one-line summ
       status: 'success',
       summary,
       fullOutput,
-      tokenUsage: json.usage ? {
-        input: json.usage.prompt_tokens ?? 0,
-        output: json.usage.completion_tokens ?? 0,
+      tokenUsage: result.usage ? {
+        input: result.usage.prompt_tokens,
+        output: result.usage.completion_tokens,
       } : undefined,
     };
 

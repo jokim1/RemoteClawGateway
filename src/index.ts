@@ -24,11 +24,14 @@ import { handleTalks } from './talks.js';
 import { handleTalkChat } from './talk-chat.js';
 import { startJobScheduler } from './job-scheduler.js';
 import { handleFileUpload } from './file-upload.js';
+import { ToolRegistry } from './tool-registry.js';
+import { ToolExecutor } from './tool-executor.js';
 
 const ROUTES = new Set([
   '/api/pair',
   '/api/providers',
   '/api/rate-limits',
+  '/api/tools',
   '/api/voice/capabilities',
   '/api/voice/transcribe',
   '/api/voice/synthesize',
@@ -134,6 +137,10 @@ const plugin = {
     // Initialize Talk store
     const talkStore = new TalkStore(pluginCfg.dataDir, api.logger);
 
+    // Initialize tool registry and executor
+    const toolRegistry = new ToolRegistry(pluginCfg.dataDir, api.logger);
+    const toolExecutor = new ToolExecutor(toolRegistry, api.logger);
+
     // Start job scheduler
     const cfg0 = api.runtime.config.loadConfig();
     const gatewayToken0 = resolveGatewayToken(cfg0);
@@ -146,6 +153,8 @@ const plugin = {
       gatewayOrigin: schedulerOrigin,
       authToken: gatewayToken0,
       logger: api.logger,
+      registry: toolRegistry,
+      executor: toolExecutor,
     });
 
     // Log voice availability
@@ -285,11 +294,20 @@ const plugin = {
               gatewayOrigin,
               authToken: gatewayToken,
               logger: api.logger,
+              registry: toolRegistry,
+              executor: toolExecutor,
             });
             return true;
           }
           // All other /api/talks/* CRUD routes
           await handleTalks(ctx, talkStore);
+          return true;
+        }
+
+        // /api/tools routes (also match /api/tools/:name)
+        if (url.pathname === '/api/tools' || url.pathname.startsWith('/api/tools/')) {
+          const { handleToolRoutes } = await import('./talks.js');
+          await handleToolRoutes(ctx, toolRegistry);
           return true;
         }
 

@@ -6,6 +6,7 @@
  */
 
 import type { TalkMeta, TalkMessage, TalkJob } from './types.js';
+import type { ToolRegistry } from './tool-registry.js';
 
 export interface SystemPromptInput {
   meta: TalkMeta;
@@ -17,10 +18,11 @@ export interface SystemPromptInput {
     roleInstructions: string;
     otherAgents: { name: string; role: string; model: string }[];
   };
+  registry?: ToolRegistry;
 }
 
 export function composeSystemPrompt(input: SystemPromptInput): string | undefined {
-  const { meta, contextMd, pinnedMessages, agentOverride } = input;
+  const { meta, contextMd, pinnedMessages, agentOverride, registry } = input;
 
   const sections: string[] = [];
 
@@ -37,21 +39,53 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
     sections.push(identitySection);
   }
 
-  // Execution environment — honest capability awareness
-  sections.push(
-    '## Execution Environment\n' +
-    'Your response is displayed in a terminal chat interface (ClawTalk). ' +
-    'Check whether you have been given tools or function-calling in this conversation.\n\n' +
-    '**If you have tools available:** Use them. If a tool call fails, tell the user what happened and suggest alternatives.\n\n' +
-    '**If you do NOT have tools available:** You can only output text in this response. Be upfront about this:\n' +
-    '- If asked to create a document or report, write the full content directly in your response.\n' +
-    '- If asked to do something that requires tools you don\'t have (file upload, web search, API calls, code execution), ' +
-    'say so IMMEDIATELY. Do not pretend you can do it. Do not say "let me try" and then produce nothing.\n' +
-    '- You can schedule a ```job block for server-side follow-up work (see Talk Jobs section below).\n\n' +
-    '**CRITICAL: Never promise an action you cannot verify completing.** ' +
-    'If you say "Let me create that file" or "I\'ll upload this now," you MUST actually produce output in this response. ' +
-    'If you cannot, say so honestly on the first attempt — do not stall across multiple turns.',
-  );
+  // Execution environment — tool-aware capability awareness
+  if (registry) {
+    const tools = registry.listTools();
+    if (tools.length > 0) {
+      const toolLines = tools.map(t => `- **${t.name}**: ${t.description.slice(0, 120)}`);
+      sections.push(
+        '## Execution Environment\n' +
+        'Your response is displayed in a terminal chat interface (ClawTalk). ' +
+        'You have **tools available** via function calling.\n\n' +
+        '### Available Tools\n' +
+        toolLines.join('\n') + '\n\n' +
+        '### Tool Usage Guidelines\n' +
+        '- **Use tools proactively** when the user asks you to perform actions (file ops, web requests, installations, etc.).\n' +
+        '- If a tool call fails, tell the user what happened and suggest alternatives.\n' +
+        '- For multi-step tasks, chain tool calls as needed — you can call tools multiple times in sequence.\n' +
+        '- `shell_exec` runs commands in a bash shell on the server. Use it for file creation, curl, package installs, etc.\n' +
+        '- `manage_tools` lets you register new custom tools to expand your capabilities.\n' +
+        '- Always report tool results clearly. Show relevant output, not just "done".\n' +
+        '- For long-running commands, consider using appropriate timeouts.\n\n' +
+        '**CRITICAL: Never promise an action you cannot verify completing.** ' +
+        'Use your tools to actually perform the action, then report the result.',
+      );
+    } else {
+      sections.push(
+        '## Execution Environment\n' +
+        'Your response is displayed in a terminal chat interface (ClawTalk). ' +
+        'No tools are currently available. You can only output text.\n\n' +
+        '- If asked to perform actions, explain that you have no tools and suggest alternatives.\n' +
+        '- You can schedule a ```job block for server-side follow-up work (see Talk Jobs section below).',
+      );
+    }
+  } else {
+    sections.push(
+      '## Execution Environment\n' +
+      'Your response is displayed in a terminal chat interface (ClawTalk). ' +
+      'Check whether you have been given tools or function-calling in this conversation.\n\n' +
+      '**If you have tools available:** Use them. If a tool call fails, tell the user what happened and suggest alternatives.\n\n' +
+      '**If you do NOT have tools available:** You can only output text in this response. Be upfront about this:\n' +
+      '- If asked to create a document or report, write the full content directly in your response.\n' +
+      '- If asked to do something that requires tools you don\'t have (file upload, web search, API calls, code execution), ' +
+      'say so IMMEDIATELY. Do not pretend you can do it. Do not say "let me try" and then produce nothing.\n' +
+      '- You can schedule a ```job block for server-side follow-up work (see Talk Jobs section below).\n\n' +
+      '**CRITICAL: Never promise an action you cannot verify completing.** ' +
+      'If you say "Let me create that file" or "I\'ll upload this now," you MUST actually produce output in this response. ' +
+      'If you cannot, say so honestly on the first attempt — do not stall across multiple turns.',
+    );
+  }
 
   // Base instruction
   sections.push(

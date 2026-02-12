@@ -2,24 +2,24 @@
  * Talk Chat Handler
  *
  * POST /api/talks/:id/chat — the main endpoint.
- * Composes the system prompt, builds the message array, proxies to
- * Moltbot /v1/chat/completions with SSE streaming, persists history,
- * and triggers async context.md updates.
+ * Composes the system prompt, builds the message array, runs the
+ * tool loop with SSE streaming, persists history, and triggers
+ * async context.md updates.
  */
 
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { TalkStore } from './talk-store.js';
 import type { TalkMessage, ImageAttachmentMeta, Logger } from './types.js';
+import type { ToolRegistry } from './tool-registry.js';
+import type { ToolExecutor } from './tool-executor.js';
 import { sendJson, readJsonBody } from './http.js';
 import { composeSystemPrompt } from './system-prompt.js';
 import { scheduleContextUpdate } from './context-updater.js';
+import { runToolLoop } from './tool-loop.js';
 
 /** Maximum number of history messages to include in LLM context. */
 const MAX_CONTEXT_MESSAGES = 50;
-
-/** Maximum response body size for non-streaming fallback. */
-const MAX_RESPONSE_BYTES = 512 * 1024;
 
 export interface TalkChatContext {
   req: IncomingMessage;
@@ -29,6 +29,8 @@ export interface TalkChatContext {
   gatewayOrigin: string;
   authToken: string | undefined;
   logger: Logger;
+  registry: ToolRegistry;
+  executor: ToolExecutor;
 }
 
 /** Extract ```job``` blocks from AI response text. */
@@ -51,7 +53,7 @@ function parseJobBlocks(text: string): Array<{ schedule: string; prompt: string 
 }
 
 export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
-  const { req, res, talkId, store, gatewayOrigin, authToken, logger } = ctx;
+  const { req, res, talkId, store, gatewayOrigin, authToken, logger, registry, executor } = ctx;
 
   if (req.method !== 'POST') {
     sendJson(res, 405, { error: 'Method not allowed' });
@@ -104,29 +106,50 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     if (msg) pinnedMessages.push(msg);
   }
 
-  // Compose system prompt
+  // Compose system prompt (now includes tool descriptions)
   const agentOverride = body.agentName ? {
     name: body.agentName,
     role: body.agentRole || '',
     roleInstructions: body.agentRoleInstructions || '',
     otherAgents: body.otherAgents || [],
   } : undefined;
-  const systemPrompt = composeSystemPrompt({ meta, contextMd, pinnedMessages, agentOverride });
+  const systemPrompt = composeSystemPrompt({ meta, contextMd, pinnedMessages, agentOverride, registry });
 
   // Load recent history
   const history = await store.getRecentMessages(talkId, MAX_CONTEXT_MESSAGES);
 
-  // Build message array for LLM
-  const messages: Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> = [];
+  // Build message array for LLM, handling tool messages from history
+  const messages: Array<any> = [];
   if (systemPrompt) {
     messages.push({ role: 'system', content: systemPrompt });
   }
   for (const m of history) {
-    let content = m.content;
-    if (m.agentName && m.role === 'assistant') {
-      content = `[${m.agentName}]: ${content}`;
+    if (m.role === 'tool') {
+      // Tool result messages need tool_call_id and name
+      messages.push({
+        role: 'tool',
+        content: m.content,
+        tool_call_id: m.tool_call_id,
+        name: m.tool_name,
+      });
+    } else if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
+      // Assistant messages with tool calls
+      let content = m.content;
+      if (m.agentName) {
+        content = `[${m.agentName}]: ${content}`;
+      }
+      messages.push({
+        role: 'assistant',
+        content: content || null,
+        tool_calls: m.tool_calls,
+      });
+    } else {
+      let content = m.content;
+      if (m.agentName && m.role === 'assistant') {
+        content = `[${m.agentName}]: ${content}`;
+      }
+      messages.push({ role: m.role, content });
     }
-    messages.push({ role: m.role, content });
   }
 
   // Build user message content (multimodal when image attached)
@@ -167,41 +190,7 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   };
   await store.appendMessage(talkId, userMsg);
 
-  // Call Moltbot /v1/chat/completions (streaming)
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  if (authToken) {
-    headers['Authorization'] = `Bearer ${authToken}`;
-  }
-
-  let llmResponse: Response;
-  try {
-    llmResponse = await fetch(`${gatewayOrigin}/v1/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model,
-        messages,
-        stream: true,
-        stream_options: { include_usage: true },
-      }),
-      signal: AbortSignal.timeout(120_000),
-    });
-  } catch (err) {
-    logger.error(`TalkChat: LLM fetch failed: ${err}`);
-    sendJson(res, 502, { error: 'Failed to reach AI provider' });
-    return;
-  }
-
-  if (!llmResponse.ok) {
-    const errBody = await llmResponse.text().catch(() => '');
-    logger.warn(`TalkChat: LLM error (${llmResponse.status}): ${errBody.slice(0, 200)}`);
-    sendJson(res, llmResponse.status, { error: errBody.slice(0, 500) });
-    return;
-  }
-
-  // Stream SSE back to client, collecting full content for persistence
+  // Set up SSE response headers
   res.statusCode = 200;
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
@@ -211,87 +200,103 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   // Inject the user message ID as a custom SSE event so the client can reference it
   res.write(`event: meta\ndata: ${JSON.stringify({ userMessageId: userMsg.id })}\n\n`);
 
-  const reader = llmResponse.body?.getReader();
-  if (!reader) {
-    sendJson(res, 502, { error: 'No response body from AI provider' });
-    return;
-  }
+  // Get tool schemas for this request
+  const tools = registry.getToolSchemas();
 
-  const decoder = new TextDecoder();
   let fullContent = '';
   let responseModel: string | undefined;
-  let buffer = '';
+  let toolCallMessages: Array<any> = [];
 
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    const result = await runToolLoop({
+      messages,
+      model,
+      tools,
+      gatewayOrigin,
+      authToken,
+      res,
+      registry,
+      executor,
+      logger,
+    });
 
-      const chunk = decoder.decode(value, { stream: true });
-      // Pass the raw SSE chunk through to the client
-      res.write(chunk);
-
-      // Also parse it to collect the full response
-      buffer += chunk;
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6);
-          if (data === '[DONE]') continue;
-          try {
-            const parsed = JSON.parse(data);
-            if (!responseModel && parsed.model) {
-              responseModel = parsed.model;
-            }
-            const content = parsed.choices?.[0]?.delta?.content;
-            if (content) fullContent += content;
-          } catch {
-            // partial chunk, ignore
-          }
-        }
-      }
-    }
+    fullContent = result.fullContent;
+    responseModel = result.responseModel;
+    toolCallMessages = result.toolCallMessages;
   } catch (err) {
-    logger.error(`TalkChat: stream error: ${err}`);
+    logger.error(`TalkChat: tool loop error: ${err}`);
+    // Write error as SSE event before closing
+    res.write(`data: ${JSON.stringify({
+      choices: [{ delta: { content: `\n\n[Error: ${err instanceof Error ? err.message : 'Unknown error'}]` } }],
+    })}\n\n`);
   } finally {
+    res.write('data: [DONE]\n\n');
     res.end();
   }
 
-  // Persist assistant message
-  if (fullContent.trim()) {
-    const assistantMsg: TalkMessage = {
-      id: randomUUID(),
-      role: 'assistant',
-      content: fullContent,
-      timestamp: Date.now(),
-      model: responseModel || model,
-      ...(body.agentName && { agentName: body.agentName }),
-      ...(body.agentRole && { agentRole: body.agentRole as any }),
-    };
-    await store.appendMessage(talkId, assistantMsg);
-
-    // Auto-create jobs from ```job``` blocks in the response
-    const jobBlocks = parseJobBlocks(fullContent);
-    for (const { schedule, prompt } of jobBlocks) {
-      const type = /^(in\s|at\s)/i.test(schedule) ? 'once' as const : 'recurring' as const;
-      const job = store.addJob(talkId, schedule, prompt, type);
-      if (job) {
-        logger.info(`TalkChat: auto-created ${type} job ${job.id} [${schedule}] for talk ${talkId}`);
+  // Persist assistant message and any tool messages
+  if (fullContent.trim() || toolCallMessages.length > 0) {
+    // Persist intermediate tool call / tool result messages
+    for (const msg of toolCallMessages) {
+      if (msg.role === 'assistant' && msg.tool_calls) {
+        const toolAssistantMsg: TalkMessage = {
+          id: randomUUID(),
+          role: 'assistant',
+          content: msg.content || '',
+          timestamp: Date.now(),
+          model: responseModel || model,
+          tool_calls: msg.tool_calls,
+          ...(body.agentName && { agentName: body.agentName }),
+          ...(body.agentRole && { agentRole: body.agentRole as any }),
+        };
+        await store.appendMessage(talkId, toolAssistantMsg);
+      } else if (msg.role === 'tool') {
+        const toolResultMsg: TalkMessage = {
+          id: randomUUID(),
+          role: 'tool',
+          content: msg.content,
+          timestamp: Date.now(),
+          tool_call_id: msg.tool_call_id,
+          tool_name: msg.name,
+        };
+        await store.appendMessage(talkId, toolResultMsg);
       }
     }
 
-    // Trigger async context update
-    scheduleContextUpdate({
-      talkId,
-      userMessage: body.message,
-      assistantResponse: fullContent,
-      model: responseModel || model,
-      gatewayOrigin,
-      authToken,
-      store,
-      logger,
-    });
+    // Persist the final assistant text response
+    if (fullContent.trim()) {
+      const assistantMsg: TalkMessage = {
+        id: randomUUID(),
+        role: 'assistant',
+        content: fullContent,
+        timestamp: Date.now(),
+        model: responseModel || model,
+        ...(body.agentName && { agentName: body.agentName }),
+        ...(body.agentRole && { agentRole: body.agentRole as any }),
+      };
+      await store.appendMessage(talkId, assistantMsg);
+
+      // Auto-create jobs from ```job``` blocks in the response
+      const jobBlocks = parseJobBlocks(fullContent);
+      for (const { schedule, prompt } of jobBlocks) {
+        const type = /^(in\s|at\s)/i.test(schedule) ? 'once' as const : 'recurring' as const;
+        const job = store.addJob(talkId, schedule, prompt, type);
+        if (job) {
+          logger.info(`TalkChat: auto-created ${type} job ${job.id} [${schedule}] for talk ${talkId}`);
+        }
+      }
+
+      // Trigger async context update
+      scheduleContextUpdate({
+        talkId,
+        userMessage: body.message,
+        assistantResponse: fullContent,
+        model: responseModel || model,
+        gatewayOrigin,
+        authToken,
+        store,
+        logger,
+      });
+    }
   }
 }
