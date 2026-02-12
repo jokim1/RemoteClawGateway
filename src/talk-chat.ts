@@ -190,6 +190,13 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   };
   await store.appendMessage(talkId, userMsg);
 
+  // Disable server-level timeouts for this long-lived SSE connection.
+  // Node.js 18+ defaults requestTimeout to 5 minutes, which is too short
+  // for multi-iteration tool loops (Opus + several tool calls can take 10+ min).
+  req.setTimeout(0);
+  res.setTimeout(0);
+  if (req.socket) req.socket.setTimeout(0);
+
   // Set up SSE response headers
   res.statusCode = 200;
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
