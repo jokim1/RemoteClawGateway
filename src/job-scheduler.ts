@@ -9,6 +9,7 @@
  *   - Simple intervals: "every 1h", "every 30m", "every 6h"
  *   - Daily: "daily 9am", "daily 14:00"
  *   - Daily with day constraint: "daily 10am weekdays", "10am weekdays", "9am weekends"
+ *   - Daily with timezone: "10am IST weekdays", "daily 9am PST", "10am Asia/Kolkata"
  *   - Cron-like: "0 9 * * 1-5" (weekdays at 9am)
  */
 
@@ -116,36 +117,144 @@ export function parseIntervalMs(schedule: string): number | null {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Timezone support
+// ---------------------------------------------------------------------------
+
+/** Common timezone abbreviations → IANA timezone names. */
+const TZ_ABBREVIATIONS: Record<string, string> = {
+  // US
+  PST: 'America/Los_Angeles', PDT: 'America/Los_Angeles',
+  MST: 'America/Denver', MDT: 'America/Denver',
+  CST: 'America/Chicago', CDT: 'America/Chicago',
+  EST: 'America/New_York', EDT: 'America/New_York',
+  AKST: 'America/Anchorage', AKDT: 'America/Anchorage',
+  HST: 'Pacific/Honolulu',
+  // Europe
+  GMT: 'Europe/London', BST: 'Europe/London',
+  CET: 'Europe/Berlin', CEST: 'Europe/Berlin',
+  EET: 'Europe/Helsinki', EEST: 'Europe/Helsinki',
+  // Asia
+  IST: 'Asia/Kolkata',
+  JST: 'Asia/Tokyo',
+  KST: 'Asia/Seoul',
+  CST_ASIA: 'Asia/Shanghai', // Use "CST_ASIA" or IANA name for China
+  SGT: 'Asia/Singapore',
+  HKT: 'Asia/Hong_Kong',
+  // Oceania
+  AEST: 'Australia/Sydney', AEDT: 'Australia/Sydney',
+  ACST: 'Australia/Adelaide', ACDT: 'Australia/Adelaide',
+  AWST: 'Australia/Perth',
+  NZST: 'Pacific/Auckland', NZDT: 'Pacific/Auckland',
+  // Universal
+  UTC: 'UTC',
+};
+
+/**
+ * Resolve a timezone token to an IANA timezone name.
+ * Accepts abbreviations (PST, IST) or IANA names (America/Los_Angeles).
+ * Returns null if unrecognized.
+ */
+export function resolveTimezone(token: string): string | null {
+  // Check abbreviation map (case-insensitive)
+  const upper = token.toUpperCase();
+  if (TZ_ABBREVIATIONS[upper]) return TZ_ABBREVIATIONS[upper];
+
+  // Check if it's a valid IANA timezone by trying to use it
+  try {
+    Intl.DateTimeFormat('en-US', { timeZone: token });
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get current time components in a specific timezone.
+ */
+function getTimeInTimezone(tz: string): { hour: number; minute: number; dayOfWeek: number; year: number; month: number; day: number } {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hour: 'numeric', minute: 'numeric',
+    year: 'numeric', month: 'numeric', day: 'numeric',
+    weekday: 'short',
+    hour12: false,
+  }).formatToParts(now);
+
+  const get = (type: string) => {
+    const p = parts.find(p => p.type === type);
+    return p ? parseInt(p.value, 10) : 0;
+  };
+
+  const weekdayStr = parts.find(p => p.type === 'weekday')?.value ?? '';
+  const dowMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+  return {
+    hour: get('hour'),
+    minute: get('minute'),
+    dayOfWeek: dowMap[weekdayStr] ?? 0,
+    year: get('year'),
+    month: get('month'),
+    day: get('day'),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Daily schedule parsing
+// ---------------------------------------------------------------------------
+
 interface DailySchedule {
   hour: number;
   minute: number;
   days: 'all' | 'weekdays' | 'weekends';
+  timezone?: string; // IANA timezone name
 }
 
 /**
  * Parse a daily schedule string into structured form.
- * Accepts: "daily 9am", "daily 14:00", "daily 10am weekdays", "10am weekdays", "9am weekends"
+ * Accepts: "daily 9am", "10am weekdays", "10am IST weekdays", "10am Asia/Kolkata weekdays"
+ * Timezone token can appear before or after the day constraint.
  * Returns null if not a daily format.
  */
 export function parseDailySchedule(schedule: string): DailySchedule | null {
-  const match = schedule.match(/^(?:daily\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(weekdays|weekends)?$/i);
+  // Match: [daily] time [am/pm] [tokens...]
+  // Tokens can be timezone and/or day constraint in any order
+  const match = schedule.match(/^(?:daily\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(.*)$/i);
   if (!match) return null;
 
   let hour = parseInt(match[1], 10);
   const minute = parseInt(match[2] ?? '0', 10);
   const ampm = match[3]?.toLowerCase();
-  const dayConstraint = match[4]?.toLowerCase();
+  const remainder = match[4]?.trim() ?? '';
 
   if (ampm === 'pm' && hour < 12) hour += 12;
   if (ampm === 'am' && hour === 12) hour = 0;
 
   if (hour > 23 || minute > 59) return null;
 
-  return {
-    hour,
-    minute,
-    days: dayConstraint === 'weekdays' ? 'weekdays' : dayConstraint === 'weekends' ? 'weekends' : 'all',
-  };
+  // Parse remaining tokens: could be timezone, day constraint, or both
+  let days: 'all' | 'weekdays' | 'weekends' = 'all';
+  let timezone: string | undefined;
+
+  if (remainder) {
+    const tokens = remainder.split(/\s+/);
+    for (const token of tokens) {
+      const lower = token.toLowerCase();
+      if (lower === 'weekdays' || lower === 'weekends') {
+        days = lower;
+      } else {
+        const resolved = resolveTimezone(token);
+        if (resolved) {
+          timezone = resolved;
+        } else {
+          return null; // Unrecognized token
+        }
+      }
+    }
+  }
+
+  return { hour, minute, days, timezone };
 }
 
 /**
@@ -171,7 +280,7 @@ export function validateSchedule(schedule: string): string | null {
   // Cron: 5 space-separated fields
   if (s.split(/\s+/).length === 5) return null;
 
-  return `Unrecognized schedule format: "${s}". Supported: "every Xh/Xm/Xd", "daily 9am/14:00", "10am weekdays/weekends", "in Xh/Xm", "at 3pm/14:00", or 5-field cron`;
+  return `Unrecognized schedule format: "${s}". Supported: "every Xh/Xm/Xd", "daily 9am", "10am IST weekdays", "in Xh/Xm", "at 3pm/14:00", or 5-field cron`;
 }
 
 /**
@@ -195,9 +304,40 @@ export function isJobDue(job: TalkJob): boolean {
     return now - lastRun >= intervalMs;
   }
 
-  // Daily schedule: "daily 9am", "daily 14:00", "daily 10am weekdays", "10am weekdays"
+  // Daily schedule: "daily 9am", "daily 14:00", "daily 10am weekdays", "10am IST weekdays"
   const daily = parseDailySchedule(job.schedule);
   if (daily) {
+    if (daily.timezone) {
+      // Timezone-aware check: get current time in the target timezone
+      const tz = getTimeInTimezone(daily.timezone);
+
+      // Check day constraint
+      if (daily.days === 'weekdays' && (tz.dayOfWeek === 0 || tz.dayOfWeek === 6)) return false;
+      if (daily.days === 'weekends' && tz.dayOfWeek >= 1 && tz.dayOfWeek <= 5) return false;
+
+      // Check if target time has been reached in the target timezone
+      const targetReached = tz.hour > daily.hour || (tz.hour === daily.hour && tz.minute >= daily.minute);
+      if (!targetReached) return false;
+
+      // Build a key for "today in target timezone" to prevent re-running
+      const tzDayKey = `${tz.year}-${tz.month}-${tz.day}`;
+      const lastRun = job.lastRunAt ?? 0;
+      if (lastRun > 0) {
+        // If last run was within the same calendar day in the target timezone, skip
+        const lastRunDate = new Date(lastRun);
+        const lastRunParts = new Intl.DateTimeFormat('en-US', {
+          timeZone: daily.timezone,
+          year: 'numeric', month: 'numeric', day: 'numeric',
+        }).formatToParts(lastRunDate);
+        const getLR = (type: string) => lastRunParts.find(p => p.type === type)?.value ?? '';
+        const lastRunDayKey = `${getLR('year')}-${getLR('month')}-${getLR('day')}`;
+        if (lastRunDayKey === tzDayKey) return false;
+      }
+
+      return true;
+    }
+
+    // No timezone — use server local time
     const today = new Date();
     const dow = today.getDay(); // 0=Sun
 
