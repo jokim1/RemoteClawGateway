@@ -22,8 +22,12 @@ const HOP_BY_HOP = new Set([
 
 const UPSTREAM_DEFAULT = 'https://api.anthropic.com';
 
-// Singleton guard — prevent double-binding on plugin hot-reload
-let activeServer: http.Server | null = null;
+// Singleton guard — prevent double-binding on plugin hot-reload.
+// Use a process-global symbol so it survives across separate module instances
+// (OpenClaw 2026.2.9+ loads plugins in two phases, creating separate scopes).
+const PROXY_KEY = Symbol.for('clawtalk.proxy.activeServer');
+const _global = globalThis as Record<symbol, http.Server | null>;
+let activeServer: http.Server | null = _global[PROXY_KEY] ?? null;
 
 // ---------------------------------------------------------------------------
 // Header parsing (Anthropic unified rate-limit format)
@@ -85,8 +89,9 @@ export function startProxy(
   port: number,
   logger: Logger,
 ): { server: http.Server; close: () => Promise<void> } {
-  // If already running (plugin hot-reload), return existing server
-  if (activeServer?.listening) {
+  // If already running or starting (plugin hot-reload / double-load), return existing server.
+  // Check for existence (not just .listening) since the server may still be binding.
+  if (activeServer) {
     logger.debug(`ClawTalk: proxy already running on 127.0.0.1:${port}`);
     return {
       server: activeServer,
@@ -155,6 +160,7 @@ export function startProxy(
   });
 
   activeServer = server;
+  _global[PROXY_KEY] = server;
 
   let retries = 0;
   const maxRetries = 5;
@@ -191,6 +197,7 @@ export function startProxy(
   const close = (): Promise<void> =>
     new Promise((resolve) => {
       activeServer = null;
+      _global[PROXY_KEY] = null;
       server.close(() => resolve());
     });
 

@@ -1,6 +1,7 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { execSync } from 'node:child_process';
+import { join } from 'node:path';
 
 import type {
   Logger,
@@ -29,11 +30,31 @@ function findOpenclawRoot(): string | null {
     '/usr/local/lib/node_modules/openclaw',
   ];
   for (const root of candidates) {
-    if (existsSync(`${root}/dist/infra/provider-usage.load.js`)) {
+    if (existsSync(`${root}/dist/index.js`)) {
       return root;
     }
   }
   return null;
+}
+
+function findCandidateModules(root: string): string[] {
+  const distDir = join(root, 'dist');
+  try {
+    const files = readdirSync(distDir);
+    const candidates: string[] = [];
+
+    // loader-<hash>.js (pre-2026.2.13)
+    const loader = files.find(f => /^loader-[A-Za-z0-9_-]+\.js$/.test(f));
+    if (loader) candidates.push(join(distDir, loader));
+
+    // reply-<hash>.js (2026.2.13+ — loadProviderUsageSummary exported as minified alias)
+    const reply = files.find(f => /^reply-[A-Za-z0-9_-]+\.js$/.test(f));
+    if (reply) candidates.push(join(distDir, reply));
+
+    return candidates;
+  } catch {
+    return [];
+  }
 }
 
 async function ensureUsageLoader(log: Logger): Promise<typeof _loadUsage> {
@@ -45,31 +66,40 @@ async function ensureUsageLoader(log: Logger): Promise<typeof _loadUsage> {
     return null;
   }
 
+  // Try bundled modules: loader-<hash>.js (pre-2026.2.13), reply-<hash>.js (2026.2.13+)
+  for (const candidatePath of findCandidateModules(root)) {
+    try {
+      const mod = await dynamicImport(pathToFileURL(candidatePath).href);
+      if (typeof mod.loadProviderUsageSummary === 'function') {
+        _loadUsage = mod.loadProviderUsageSummary;
+        log.info('ClawTalk: usage loader initialized via bundled loader');
+        return _loadUsage;
+      }
+      // Check minified export names — the function may be aliased (e.g. "bt")
+      for (const key of Object.keys(mod)) {
+        if (typeof mod[key] === 'function' && mod[key].name === 'loadProviderUsageSummary') {
+          _loadUsage = mod[key];
+          log.info('ClawTalk: usage loader initialized via bundled loader (aliased)');
+          return _loadUsage;
+        }
+      }
+    } catch (err) {
+      log.debug(`ClawTalk: candidate import failed (${candidatePath}): ${err}`);
+    }
+  }
+
+  // Legacy: try the old unbundled path
   try {
     const mod = await dynamicImport(
       pathToFileURL(`${root}/dist/infra/provider-usage.load.js`).href
     );
     if (typeof mod.loadProviderUsageSummary === 'function') {
       _loadUsage = mod.loadProviderUsageSummary;
-      log.info('ClawTalk: usage loader initialized via import()');
+      log.info('ClawTalk: usage loader initialized via legacy path');
       return _loadUsage;
     }
-    log.warn(`ClawTalk: module loaded, keys: ${Object.keys(mod).join(', ')}`);
-  } catch (err) {
-    log.info(`ClawTalk: import() approach failed: ${err}`);
-  }
-
-  try {
-    const mod = await dynamicImport(
-      pathToFileURL(`${root}/dist/infra/provider-usage.js`).href
-    );
-    if (typeof mod.loadProviderUsageSummary === 'function') {
-      _loadUsage = mod.loadProviderUsageSummary;
-      log.info('ClawTalk: usage loader initialized via barrel import');
-      return _loadUsage;
-    }
-  } catch (err) {
-    log.info(`ClawTalk: barrel import failed: ${err}`);
+  } catch {
+    // expected on newer openclaw versions
   }
 
   log.info('ClawTalk: falling back to subprocess strategy');
@@ -81,13 +111,33 @@ function createSubprocessUsageLoader(
   openclawRoot: string,
   log: Logger,
 ): (opts?: any) => Promise<UsageSummary> {
+  const candidates = findCandidateModules(openclawRoot);
+  const legacyPath = `${openclawRoot}/dist/infra/provider-usage.load.js`;
   return async () => {
+    // Build a script that tries each candidate module to find loadProviderUsageSummary
+    const imports = [
+      ...candidates.map(p => `"${p}"`),
+      `"${legacyPath}"`,
+    ];
+    const script = `
+      async function run() {
+        for (const path of [${imports.join(', ')}]) {
+          try {
+            const mod = await import(path);
+            const fn = mod.loadProviderUsageSummary
+              ?? Object.values(mod).find(v => typeof v === 'function' && v.name === 'loadProviderUsageSummary');
+            if (fn) {
+              const result = await fn();
+              process.stdout.write(JSON.stringify(result));
+              return;
+            }
+          } catch {}
+        }
+        process.stdout.write(JSON.stringify({ updatedAt: Date.now(), providers: [] }));
+      }
+      run();
+    `;
     try {
-      const script = `
-        import { loadProviderUsageSummary } from "${openclawRoot}/dist/infra/provider-usage.load.js";
-        const result = await loadProviderUsageSummary();
-        process.stdout.write(JSON.stringify(result));
-      `;
       const output = execSync(
         `node --input-type=module -e '${script.replace(/'/g, "'\\''")}'`,
         {

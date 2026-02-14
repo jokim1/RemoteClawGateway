@@ -19,8 +19,36 @@ import type { ToolExecutor, ToolExecResult } from './tool-executor.js';
 /** Maximum tool loop iterations per message. */
 const MAX_ITERATIONS = 10;
 
-/** Timeout per LLM streaming call (5 min — Opus can be slow with large outputs). */
-const LLM_CALL_TIMEOUT_MS = 300_000;
+/** Inactivity timeout for the streaming tool loop — resets on each chunk/event (5 min). */
+const LOOP_INACTIVITY_MS = 300_000;
+
+/** Hard max timeout for the entire streaming tool loop (30 min). */
+const LOOP_MAX_MS = 1_800_000;
+
+/**
+ * Create an AbortController with an activity-based timeout.
+ * The timer resets each time `touch()` is called.
+ * Falls back to a hard maximum timeout as a safety net.
+ */
+function createActivityAbort(inactivityMs: number, maxMs: number) {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+
+  const resetTimer = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(), inactivityMs);
+  };
+
+  // Hard maximum timeout safety net
+  const maxTimer = setTimeout(() => controller.abort(), maxMs);
+
+  resetTimer();
+  return {
+    signal: controller.signal,
+    touch: resetTimer,
+    clear: () => { clearTimeout(timer); clearTimeout(maxTimer); },
+  };
+}
 
 /** Accumulated tool call fragment from streaming delta. */
 interface ToolCallAccumulator {
@@ -65,6 +93,13 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
   let responseModel: string | undefined;
   const toolCallMessages: ToolLoopStreamResult['toolCallMessages'] = [];
 
+  // Activity-based abort spanning the entire tool loop.
+  // Resets on every chunk, tool event, and keepalive.
+  const inactivityMs = opts.timeoutMs ?? LOOP_INACTIVITY_MS;
+  const maxMs = Math.min(inactivityMs * 6, LOOP_MAX_MS);
+  const abort = createActivityAbort(inactivityMs, maxMs);
+
+  try {
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
@@ -81,7 +116,7 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
           stream: true,
           stream_options: { include_usage: true },
         }),
-        signal: AbortSignal.timeout(opts.timeoutMs ?? LLM_CALL_TIMEOUT_MS),
+        signal: abort.signal,
       });
     } catch (err) {
       logger.error(`ToolLoop: LLM fetch failed (iteration ${iteration}): ${err}`);
@@ -109,6 +144,7 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
         const { done, value } = await reader.read();
         if (done) break;
 
+        abort.touch(); // Reset inactivity timer on each chunk
         const chunk = decoder.decode(value, { stream: true });
 
         // Forward raw SSE text chunks to client (for streaming text display)
@@ -213,6 +249,7 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
           name: tc.function.name,
           arguments: tc.function.arguments,
         })}\n\n`);
+        abort.touch();
 
         const result = await executor.execute(tc.function.name, tc.function.arguments);
 
@@ -224,6 +261,7 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
           content: result.content.slice(0, 2000), // Truncate for SSE event
           durationMs: result.durationMs,
         })}\n\n`);
+        abort.touch();
 
         // Add tool result to messages array
         const toolResultMsg: any = {
@@ -236,6 +274,11 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
         toolCallMessages.push(toolResultMsg);
       }
 
+      // Keepalive between iterations — resets both gateway and TUI client
+      // inactivity timers during the TTFT gap before the next LLM call.
+      res.write(': keepalive\n\n');
+      abort.touch();
+
       // Continue the loop — LLM will see the tool results
       logger.info(`ToolLoop: iteration ${iteration + 1}, executed ${toolCalls.length} tool(s)`);
       continue;
@@ -243,6 +286,9 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
 
     // Model finished with text response (or stop)
     break;
+  }
+  } finally {
+    abort.clear();
   }
 
   return { fullContent, responseModel, toolCallMessages };
