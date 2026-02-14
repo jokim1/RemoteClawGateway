@@ -287,15 +287,32 @@ async function handleCreateJob(ctx: HandlerContext, store: TalkStore, talkId: st
 
   if (eventScope) {
     const bindings = talk.platformBindings ?? [];
+
+    // Resolve platformN shorthand → real scope
+    let resolvedScope = eventScope;
+    const platformMatch = eventScope.match(/^platform(\d+)$/i);
+    if (platformMatch) {
+      const idx = parseInt(platformMatch[1], 10);
+      if (idx < 1 || idx > bindings.length) {
+        sendJson(ctx.res, 400, {
+          error: `No platform binding at position ${idx}. This talk has ${bindings.length} binding(s). Use /platform list to see them.`,
+        });
+        return;
+      }
+      resolvedScope = bindings[idx - 1].scope;
+    }
+
     const matchingBinding = bindings.find(
-      b => b.scope.toLowerCase() === eventScope.toLowerCase(),
+      b => b.scope.toLowerCase() === resolvedScope.toLowerCase(),
     );
     if (!matchingBinding) {
       sendJson(ctx.res, 400, {
-        error: `No platform binding found for "${eventScope}". Add one with /platform <name> ${eventScope} <permission>`,
+        error: `No platform binding found for "${resolvedScope}". Add one with /platform <name> ${resolvedScope} <permission>, or use platformN shorthand.`,
       });
       return;
     }
+    // Rewrite schedule with resolved scope so downstream always sees real scope
+    body.schedule = `on ${resolvedScope}`;
     jobType = 'event';
   }
 
