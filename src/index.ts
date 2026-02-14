@@ -23,6 +23,7 @@ import { TalkStore } from './talk-store.js';
 import { handleTalks } from './talks.js';
 import { handleTalkChat } from './talk-chat.js';
 import { startJobScheduler } from './job-scheduler.js';
+import { EventDispatcher } from './event-dispatcher.js';
 import { handleFileUpload } from './file-upload.js';
 import { ToolRegistry } from './tool-registry.js';
 import { ToolExecutor } from './tool-executor.js';
@@ -174,6 +175,42 @@ const plugin = {
       },
     });
 
+    // Initialize event dispatcher for event-driven jobs
+    let eventDispatcher: EventDispatcher | null = null;
+    api.registerService({
+      id: 'clawtalk-event-dispatcher',
+      start: () => {
+        const cfg0 = api.runtime.config.loadConfig();
+        const gatewayToken0 = resolveGatewayToken(cfg0);
+        const dispatcherOrigin = 'http://127.0.0.1:18789';
+        eventDispatcher = new EventDispatcher({
+          store: talkStore,
+          gatewayOrigin: dispatcherOrigin,
+          authToken: gatewayToken0,
+          logger: api.logger,
+          registry: toolRegistry,
+          executor: toolExecutor,
+          jobTimeoutMs: pluginCfg.jobTimeoutMs,
+        });
+        api.logger.info('ClawTalk: event dispatcher started');
+      },
+      stop: () => {
+        if (eventDispatcher) {
+          eventDispatcher.cleanup();
+          eventDispatcher = null;
+          api.logger.info('ClawTalk: event dispatcher stopped');
+        }
+      },
+    });
+
+    // Listen for incoming platform messages (Slack, Telegram, etc.)
+    api.on('message_received', (event: any, ctx: any) => {
+      if (!eventDispatcher) return;
+      eventDispatcher.handleMessageReceived(event, ctx).catch(err => {
+        api.logger.warn(`ClawTalk: event dispatch error: ${err}`);
+      });
+    });
+
     // Register lifecycle hooks
     api.on('gateway_start', () => {
       api.logger.info('ClawTalk: gateway_start event received');
@@ -184,6 +221,10 @@ const plugin = {
       if (stopScheduler) {
         stopScheduler();
         stopScheduler = null;
+      }
+      if (eventDispatcher) {
+        eventDispatcher.cleanup();
+        eventDispatcher = null;
       }
     });
 

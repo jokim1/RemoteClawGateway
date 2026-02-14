@@ -9,7 +9,7 @@ import type { HandlerContext } from './types.js';
 import type { TalkStore } from './talk-store.js';
 import type { ToolRegistry } from './tool-registry.js';
 import { sendJson, readJsonBody } from './http.js';
-import { validateSchedule } from './job-scheduler.js';
+import { validateSchedule, parseEventTrigger } from './job-scheduler.js';
 
 /**
  * Route a /api/talks request to the appropriate handler.
@@ -281,7 +281,25 @@ async function handleCreateJob(ctx: HandlerContext, store: TalkStore, talkId: st
     return;
   }
 
-  const job = store.addJob(talkId, body.schedule, body.prompt);
+  // Detect event-driven jobs and validate scope against platform bindings
+  const eventScope = parseEventTrigger(body.schedule);
+  let jobType: 'once' | 'recurring' | 'event' | undefined;
+
+  if (eventScope) {
+    const bindings = talk.platformBindings ?? [];
+    const matchingBinding = bindings.find(
+      b => b.scope.toLowerCase() === eventScope.toLowerCase(),
+    );
+    if (!matchingBinding) {
+      sendJson(ctx.res, 400, {
+        error: `No platform binding found for "${eventScope}". Add one with /platform <name> ${eventScope} <permission>`,
+      });
+      return;
+    }
+    jobType = 'event';
+  }
+
+  const job = store.addJob(talkId, body.schedule, body.prompt, jobType);
   if (!job) {
     sendJson(ctx.res, 500, { error: 'Failed to create job' });
     return;

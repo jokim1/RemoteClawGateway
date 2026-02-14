@@ -24,6 +24,9 @@ import { runToolLoopNonStreaming } from './tool-loop.js';
 /** How often the scheduler checks for due jobs. */
 const CHECK_INTERVAL_MS = 60_000; // 1 minute
 
+/** Default debounce for event-driven jobs. */
+export const EVENT_JOB_DEBOUNCE_MS = 5_000;
+
 /** Maximum time for a single job execution. */
 const JOB_TIMEOUT_MS = 120_000; // 2 minutes
 
@@ -257,6 +260,21 @@ export function parseDailySchedule(schedule: string): DailySchedule | null {
   return { hour, minute, days, timezone };
 }
 
+// ---------------------------------------------------------------------------
+// Event trigger parsing
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse an event trigger schedule ("on <scope>").
+ * Returns the scope string, or null if not an event trigger format.
+ */
+export function parseEventTrigger(schedule: string): string | null {
+  const match = schedule.match(/^on\s+(.+)$/i);
+  if (!match) return null;
+  const scope = match[1].trim();
+  return scope || null;
+}
+
 /**
  * Validate that a schedule string matches a recognized format.
  * Returns null if valid, or an error message describing the problem.
@@ -266,6 +284,9 @@ export function validateSchedule(schedule: string): string | null {
     return 'Schedule must be a non-empty string';
   }
   const s = schedule.trim();
+
+  // Event trigger: "on <scope>"
+  if (parseEventTrigger(s) !== null) return null;
 
   // One-off: "in Xh", "at 3pm", etc.
   if (parseOneOff(s, Date.now()) !== null) return null;
@@ -280,7 +301,7 @@ export function validateSchedule(schedule: string): string | null {
   // Cron: 5 space-separated fields
   if (s.split(/\s+/).length === 5) return null;
 
-  return `Unrecognized schedule format: "${s}". Supported: "every Xh/Xm/Xd", "daily 9am", "10am IST weekdays", "in Xh/Xm", "at 3pm/14:00", or 5-field cron`;
+  return `Unrecognized schedule format: "${s}". Supported: "on <scope>" (event), "every Xh/Xm/Xd", "daily 9am", "10am IST weekdays", "in Xh/Xm", "at 3pm/14:00", or 5-field cron`;
 }
 
 /**
@@ -288,6 +309,9 @@ export function validateSchedule(schedule: string): string | null {
  */
 export function isJobDue(job: TalkJob): boolean {
   if (!job.active) return false;
+
+  // Event-driven jobs are never "due" on the cron loop — they fire via EventDispatcher
+  if (job.type === 'event' || parseEventTrigger(job.schedule) !== null) return false;
 
   const now = Date.now();
 
@@ -441,10 +465,12 @@ async function checkAndRunJobs(opts: JobSchedulerOptions): Promise<void> {
   }
 }
 
-async function executeJob(
+export async function executeJob(
   opts: JobSchedulerOptions,
   talkId: string,
   job: TalkJob,
+  /** Extra context injected before the job prompt (e.g. event trigger details). */
+  triggerContext?: string,
 ): Promise<void> {
   const { store, gatewayOrigin, authToken, logger, registry, executor } = opts;
   const runAt = Date.now();
@@ -473,9 +499,13 @@ async function executeJob(
     });
 
     // Build the job execution prompt
-    const jobPrompt = `You are running a scheduled background job for this conversation.
+    const triggerSection = triggerContext
+      ? `\n${triggerContext}\n`
+      : '';
+    const jobKind = job.type === 'event' ? 'event-triggered' : 'scheduled';
+    const jobPrompt = `You are running a ${jobKind} background job for this conversation.
 
-Job schedule: ${job.schedule}
+Job schedule: ${job.schedule}${triggerSection}
 Job task: ${job.prompt}
 
 You have tools available — use them if the task requires actions (file ops, web requests, etc.).

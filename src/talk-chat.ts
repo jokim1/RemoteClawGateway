@@ -310,7 +310,14 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
       // Auto-create jobs from ```job``` blocks in the response
       const jobBlocks = parseJobBlocks(fullContent);
       for (const { schedule, prompt } of jobBlocks) {
-        const type = /^(in\s|at\s)/i.test(schedule) ? 'once' as const : 'recurring' as const;
+        let type: 'once' | 'recurring' | 'event';
+        if (/^on\s+/i.test(schedule)) {
+          type = 'event';
+        } else if (/^(in\s|at\s)/i.test(schedule)) {
+          type = 'once';
+        } else {
+          type = 'recurring';
+        }
         const job = store.addJob(talkId, schedule, prompt, type);
         if (job) {
           logger.info(`TalkChat: auto-created ${type} job ${job.id} [${schedule}] for talk ${talkId}`);

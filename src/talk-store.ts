@@ -376,7 +376,7 @@ export class TalkStore {
   // Job management
   // -------------------------------------------------------------------------
 
-  addJob(talkId: string, schedule: string, prompt: string, type?: 'once' | 'recurring'): TalkJob | null {
+  addJob(talkId: string, schedule: string, prompt: string, type?: 'once' | 'recurring' | 'event'): TalkJob | null {
     const meta = this.talks.get(talkId);
     if (!meta) return null;
 

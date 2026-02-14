@@ -176,8 +176,8 @@ export interface TalkMessage {
 
 export interface TalkJob {
   id: string;
-  type?: 'once' | 'recurring';  // default 'recurring' for backwards compat
-  schedule: string;
+  type?: 'once' | 'recurring' | 'event';  // default 'recurring' for backwards compat
+  schedule: string;  // time-based schedule OR "on <scope>" for event-driven
   prompt: string;
   active: boolean;
   createdAt: number;

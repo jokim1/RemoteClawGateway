@@ -192,14 +192,32 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
   // Active jobs (cap prompt display at MAX_JOB_PROMPT_CHARS each)
   const activeJobs = meta.jobs.filter(j => j.active);
   if (activeJobs.length > 0) {
-    const jobLines = activeJobs.map(j => {
-      const promptPreview = j.prompt.length > MAX_JOB_PROMPT_CHARS
-        ? j.prompt.slice(0, MAX_JOB_PROMPT_CHARS) + '...'
-        : j.prompt;
-      return `- [${j.schedule}] ${promptPreview}`;
-    });
+    const scheduledJobs = activeJobs.filter(j => j.type !== 'event');
+    const eventJobs = activeJobs.filter(j => j.type === 'event');
+    const lines: string[] = [];
+
+    if (scheduledJobs.length > 0) {
+      lines.push('**Scheduled:**');
+      for (const j of scheduledJobs) {
+        const promptPreview = j.prompt.length > MAX_JOB_PROMPT_CHARS
+          ? j.prompt.slice(0, MAX_JOB_PROMPT_CHARS) + '...'
+          : j.prompt;
+        lines.push(`- [${j.schedule}] ${promptPreview}`);
+      }
+    }
+
+    if (eventJobs.length > 0) {
+      lines.push('**Event-driven:**');
+      for (const j of eventJobs) {
+        const promptPreview = j.prompt.length > MAX_JOB_PROMPT_CHARS
+          ? j.prompt.slice(0, MAX_JOB_PROMPT_CHARS) + '...'
+          : j.prompt;
+        lines.push(`- [${j.schedule}] ${promptPreview}`);
+      }
+    }
+
     sections.push(
-      `## Active Jobs\nBackground tasks monitoring this conversation:\n${jobLines.join('\n')}`,
+      `## Active Jobs\nBackground tasks monitoring this conversation:\n${lines.join('\n')}`,
     );
   }
 
@@ -227,10 +245,14 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
     `prompt: <self-contained instruction for each run>\n` +
     '```\n\n' +
     `Schedule formats:\n` +
+    '- Event: `on <scope>` — triggers when a message arrives matching a `/platform` binding (e.g. `on #kids-study-log`)\n' +
     '- One-off: `in 1h`, `in 30m`, `at 3pm`, `at 14:00` (runs once, then deactivates)\n' +
     '- Interval: `every 2h`, `every 30m` (recurring)\n' +
     '- Daily: `daily 8am`, `daily 14:00` (recurring)\n' +
     '- Cron: `0 8 * * *` (daily 8 AM), `0 9 * * 1` (Monday 9 AM), `30 17 * * 1-5` (weekdays 5:30 PM)\n\n' +
+    `Event-driven jobs fire whenever a message arrives from the specified platform scope. ` +
+    `The scope must match an existing \`/platform\` binding. The message content and sender ` +
+    `are injected into the job context automatically.\n\n` +
     `One-off jobs run once at the specified time, then auto-deactivate. ` +
     `When you promise to follow up later (e.g. "I'll research this and have it for you in an hour"), ` +
     `create a one-off job to ensure you deliver.\n\n` +
