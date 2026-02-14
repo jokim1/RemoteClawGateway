@@ -223,6 +223,7 @@ export interface TalkMeta {
   agents?: TalkAgent[];
   directives?: TalkDirective[];
   platformBindings?: TalkPlatformBinding[];
+  processing?: boolean;
   createdAt: number;
   updatedAt: number;
 }

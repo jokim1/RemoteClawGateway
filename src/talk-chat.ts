@@ -228,6 +228,7 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   let responseModel: string | undefined;
   let toolCallMessages: Array<any> = [];
 
+  store.setProcessing(talkId, true);
   try {
     const result = await runToolLoop({
       messages,
@@ -257,6 +258,7 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
       res.write(`event: error\ndata: ${JSON.stringify({ message: errMessage, transient })}\n\n`);
     }
   } finally {
+    store.setProcessing(talkId, false);
     if (!res.writableEnded) {
       res.write('data: [DONE]\n\n');
       res.end();

@@ -451,6 +451,7 @@ async function executeJob(
 
   logger.info(`JobScheduler: executing job ${job.id} for talk ${talkId}: "${job.prompt}"`);
 
+  store.setProcessing(talkId, true);
   try {
     // Compose system prompt from Talk context
     const meta = store.getTalk(talkId);
@@ -547,5 +548,7 @@ Provide a concise report of your findings or actions. Start with a one-line summ
       logger.error(`JobScheduler: failed to persist error report for job ${job.id}: ${reportErr}`);
     });
     store.updateJob(talkId, job.id, { lastRunAt: runAt, lastStatus: 'error' });
+  } finally {
+    store.setProcessing(talkId, false);
   }
 }

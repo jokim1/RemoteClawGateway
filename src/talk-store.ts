@@ -102,6 +102,7 @@ export class TalkStore {
       model,
       pinnedMessageIds: [],
       jobs: [],
+      processing: false,
       createdAt: now,
       updatedAt: now,
     };
@@ -151,6 +152,15 @@ export class TalkStore {
       });
     }
     return true;
+  }
+
+  /** Set the processing flag without touching updatedAt (avoids re-triggering unread badge). */
+  setProcessing(id: string, processing: boolean): void {
+    const meta = this.talks.get(id);
+    if (!meta) return;
+    meta.processing = processing;
+    this.invalidateListCache();
+    this.persistMeta(meta);
   }
 
   // -------------------------------------------------------------------------
