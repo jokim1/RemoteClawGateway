@@ -317,8 +317,11 @@ const plugin = {
           // POST /api/talks/:id/chat
           const chatMatch = url.pathname.match(/^\/api\/talks\/([\w-]+)\/chat$/);
           if (chatMatch) {
-            const host = req.headers.host ?? 'localhost:18789';
-            const gatewayOrigin = `http://${host}`;
+            // Use the socket's local address for self-calls — the gateway may
+            // bind to a specific IP (e.g. Tailscale) rather than 0.0.0.0.
+            const selfAddr = req.socket?.localAddress ?? '127.0.0.1';
+            const selfPort = req.socket?.localPort ?? 18789;
+            const gatewayOrigin = `http://${selfAddr}:${selfPort}`;
             const gatewayToken = resolveGatewayToken(cfg);
             await handleTalkChat({
               req, res,
