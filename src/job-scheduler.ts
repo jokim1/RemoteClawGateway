@@ -8,6 +8,7 @@
  * Schedules supported:
  *   - Simple intervals: "every 1h", "every 30m", "every 6h"
  *   - Daily: "daily 9am", "daily 14:00"
+ *   - Daily with day constraint: "daily 10am weekdays", "10am weekdays", "9am weekends"
  *   - Cron-like: "0 9 * * 1-5" (weekdays at 9am)
  */
 
@@ -115,6 +116,38 @@ export function parseIntervalMs(schedule: string): number | null {
   return null;
 }
 
+interface DailySchedule {
+  hour: number;
+  minute: number;
+  days: 'all' | 'weekdays' | 'weekends';
+}
+
+/**
+ * Parse a daily schedule string into structured form.
+ * Accepts: "daily 9am", "daily 14:00", "daily 10am weekdays", "10am weekdays", "9am weekends"
+ * Returns null if not a daily format.
+ */
+export function parseDailySchedule(schedule: string): DailySchedule | null {
+  const match = schedule.match(/^(?:daily\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(weekdays|weekends)?$/i);
+  if (!match) return null;
+
+  let hour = parseInt(match[1], 10);
+  const minute = parseInt(match[2] ?? '0', 10);
+  const ampm = match[3]?.toLowerCase();
+  const dayConstraint = match[4]?.toLowerCase();
+
+  if (ampm === 'pm' && hour < 12) hour += 12;
+  if (ampm === 'am' && hour === 12) hour = 0;
+
+  if (hour > 23 || minute > 59) return null;
+
+  return {
+    hour,
+    minute,
+    days: dayConstraint === 'weekdays' ? 'weekdays' : dayConstraint === 'weekends' ? 'weekends' : 'all',
+  };
+}
+
 /**
  * Validate that a schedule string matches a recognized format.
  * Returns null if valid, or an error message describing the problem.
@@ -131,13 +164,14 @@ export function validateSchedule(schedule: string): string | null {
   // Interval: "every Xh", "every Xm", "every Xd"
   if (parseIntervalMs(s) !== null) return null;
 
-  // Daily: "daily 9am", "daily 14:00"
-  if (/^daily\s+\d{1,2}(?::\d{2})?\s*(am|pm)?$/i.test(s)) return null;
+  // Daily (with optional day constraint): "daily 9am", "daily 14:00", "daily 10am weekdays",
+  // "10am weekdays", "9am weekends"
+  if (parseDailySchedule(s) !== null) return null;
 
   // Cron: 5 space-separated fields
   if (s.split(/\s+/).length === 5) return null;
 
-  return `Unrecognized schedule format: "${s}". Supported: "every Xh/Xm/Xd", "daily 9am/14:00", "in Xh/Xm", "at 3pm/14:00", or 5-field cron`;
+  return `Unrecognized schedule format: "${s}". Supported: "every Xh/Xm/Xd", "daily 9am/14:00", "10am weekdays/weekends", "in Xh/Xm", "at 3pm/14:00", or 5-field cron`;
 }
 
 /**
@@ -161,17 +195,17 @@ export function isJobDue(job: TalkJob): boolean {
     return now - lastRun >= intervalMs;
   }
 
-  // Daily schedule: "daily 9am", "daily 14:00"
-  const dailyMatch = job.schedule.match(/^daily\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
-  if (dailyMatch) {
-    let hour = parseInt(dailyMatch[1], 10);
-    const minute = parseInt(dailyMatch[2] ?? '0', 10);
-    const ampm = dailyMatch[3]?.toLowerCase();
-    if (ampm === 'pm' && hour < 12) hour += 12;
-    if (ampm === 'am' && hour === 12) hour = 0;
-
+  // Daily schedule: "daily 9am", "daily 14:00", "daily 10am weekdays", "10am weekdays"
+  const daily = parseDailySchedule(job.schedule);
+  if (daily) {
     const today = new Date();
-    const targetToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), hour, minute, 0, 0);
+    const dow = today.getDay(); // 0=Sun
+
+    // Check day constraint
+    if (daily.days === 'weekdays' && (dow === 0 || dow === 6)) return false;
+    if (daily.days === 'weekends' && dow >= 1 && dow <= 5) return false;
+
+    const targetToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), daily.hour, daily.minute, 0, 0);
     const targetMs = targetToday.getTime();
 
     // Has this job run today (since the target time)?
