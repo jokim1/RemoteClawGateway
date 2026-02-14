@@ -19,6 +19,9 @@ import type { ToolExecutor, ToolExecResult } from './tool-executor.js';
 /** Maximum tool loop iterations per message. */
 const MAX_ITERATIONS = 10;
 
+/** Maximum auto-continuations when the model hits max output tokens. */
+const MAX_CONTINUATIONS = 3;
+
 /** Inactivity timeout for the streaming tool loop — resets on each chunk/event (5 min). */
 const LOOP_INACTIVITY_MS = 300_000;
 
@@ -98,6 +101,7 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
   const inactivityMs = opts.timeoutMs ?? LOOP_INACTIVITY_MS;
   const maxMs = Math.min(inactivityMs * 6, LOOP_MAX_MS);
   const abort = createActivityAbort(inactivityMs, maxMs);
+  let continuations = 0;
 
   try {
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
@@ -284,6 +288,21 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
       continue;
     }
 
+    // If the model hit max output tokens, auto-continue
+    if (finishReason === 'length' && continuations < MAX_CONTINUATIONS) {
+      continuations++;
+      logger.info(`ToolLoop: output truncated (finish_reason=length), auto-continuing (${continuations}/${MAX_CONTINUATIONS})`);
+
+      // Push the truncated assistant content so far
+      messages.push({ role: 'assistant', content: iterContent });
+      // Ask the model to continue
+      messages.push({ role: 'user', content: 'Continue from where you left off.' });
+
+      res.write(': keepalive\n\n');
+      abort.touch();
+      continue;
+    }
+
     // Model finished with text response (or stop)
     break;
   }
@@ -324,6 +343,7 @@ export async function runToolLoopNonStreaming(opts: ToolLoopNonStreamOptions): P
   let fullContent = '';
   let responseModel: string | undefined;
   let lastUsage: { prompt_tokens: number; completion_tokens: number } | undefined;
+  let continuations = 0;
 
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -394,8 +414,19 @@ export async function runToolLoopNonStreaming(opts: ToolLoopNonStreamOptions): P
       continue;
     }
 
+    // If the model hit max output tokens, auto-continue
+    if (choice?.finish_reason === 'length' && continuations < MAX_CONTINUATIONS) {
+      continuations++;
+      fullContent += textContent;
+      logger.info(`ToolLoop (non-stream): output truncated (finish_reason=length), auto-continuing (${continuations}/${MAX_CONTINUATIONS})`);
+
+      messages.push({ role: 'assistant', content: textContent } as any);
+      messages.push({ role: 'user', content: 'Continue from where you left off.' } as any);
+      continue;
+    }
+
     // Final text response
-    fullContent = textContent;
+    fullContent += textContent;
     break;
   }
 
