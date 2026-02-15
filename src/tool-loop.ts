@@ -270,12 +270,11 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
 
           if (iterContent) {
             // Mid-stream failure: partial content was already sent to client.
-            // Push partial as assistant message + continuation prompt so the LLM
-            // picks up where it left off.
-            fullContent += iterContent;
+            // Signal the client to discard it, then ask the LLM to restate.
+            res.write('event: content_reset\ndata: {}\n\n');
             messages.push({ role: 'assistant', content: iterContent });
-            messages.push({ role: 'user', content: 'Your previous response was interrupted mid-stream. Continue from where you left off.' });
-            logger.info(`ToolLoop: mid-stream failure (iteration ${iteration}), retrying with ${iterContent.length} chars of partial content`);
+            messages.push({ role: 'user', content: 'Your previous response was cut off. Please provide your complete response again.' });
+            logger.info(`ToolLoop: mid-stream failure (iteration ${iteration}), resending after content_reset (${iterContent.length} chars discarded)`);
           } else if (!fetchOk) {
             // Pre-fetch failure: no content sent, just retry the same request
             // Roll back any messages added this iteration
