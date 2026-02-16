@@ -39,6 +39,7 @@ import {
 import { normalizeSlackBindingScope } from './talks.js';
 import { findOpenClawSlackOwnershipConflicts } from './slack-ownership-doctor.js';
 import { reconcileSlackRoutingForTalks } from './slack-routing-sync.js';
+import { reconcileAnthropicProxyBaseUrls } from './provider-baseurl-sync.js';
 
 // ---------------------------------------------------------------------------
 // Node.js 25 fetch fix — replace built-in undici connector to fix Tailscale IP
@@ -448,7 +449,12 @@ const plugin = {
     api.logger.info('ClawTalk plugin loaded');
 
     // Start the rate-limit capture proxy
-    startProxy(pluginCfg.proxyPort ?? 18793, api.logger);
+    const proxyPort = pluginCfg.proxyPort ?? 18793;
+    startProxy(proxyPort, api.logger);
+    void reconcileAnthropicProxyBaseUrls(proxyPort, api.logger).catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      api.logger.warn(`ClawTalk: failed to reconcile Anthropic baseUrl: ${message}`);
+    });
 
     // Eagerly warm up the usage loader in background
     warmUsageLoader(api.logger);
@@ -597,6 +603,10 @@ const plugin = {
     api.on('gateway_start', () => {
       refreshSlackIngressRoute();
       logSlackOwnershipConflicts();
+      void reconcileAnthropicProxyBaseUrls(proxyPort, api.logger).catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        api.logger.warn(`ClawTalk: failed to reconcile Anthropic baseUrl: ${message}`);
+      });
       void reconcileSlackRoutingForTalks(talkStore.listTalks(), api.logger);
       api.logger.info('ClawTalk: gateway_start event received');
     });

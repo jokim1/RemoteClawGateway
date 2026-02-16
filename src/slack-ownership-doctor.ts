@@ -7,6 +7,7 @@ type OpenClawSlackBinding = {
   agentId: string;
   accountId: string;
   scope: string;
+  order: number;
 };
 
 export type SlackOwnershipConflict = {
@@ -36,7 +37,8 @@ function parseOpenClawSlackBindings(cfg: Record<string, unknown>): OpenClawSlack
   const rawBindings = Array.isArray(cfg.bindings) ? cfg.bindings : [];
   const parsed: OpenClawSlackBinding[] = [];
 
-  for (const row of rawBindings) {
+  for (let order = 0; order < rawBindings.length; order += 1) {
+    const row = rawBindings[order];
     if (!row || typeof row !== 'object') continue;
     const binding = row as Record<string, unknown>;
     const agentId = typeof binding.agentId === 'string' ? binding.agentId.trim() : '';
@@ -53,7 +55,7 @@ function parseOpenClawSlackBindings(cfg: Record<string, unknown>): OpenClawSlack
       ? match.peer as Record<string, unknown>
       : null;
     if (!peer) {
-      parsed.push({ agentId, accountId, scope: 'slack:*' });
+      parsed.push({ agentId, accountId, scope: 'slack:*', order });
       continue;
     }
     const kind = typeof peer.kind === 'string' ? peer.kind.trim().toLowerCase() : '';
@@ -61,11 +63,11 @@ function parseOpenClawSlackBindings(cfg: Record<string, unknown>): OpenClawSlack
     if (!id || !kind) continue;
 
     if (kind === 'channel') {
-      parsed.push({ agentId, accountId, scope: `channel:${id.toUpperCase()}`.toLowerCase() });
+      parsed.push({ agentId, accountId, scope: `channel:${id.toUpperCase()}`.toLowerCase(), order });
       continue;
     }
     if (kind === 'user') {
-      parsed.push({ agentId, accountId, scope: `user:${id.toUpperCase()}`.toLowerCase() });
+      parsed.push({ agentId, accountId, scope: `user:${id.toUpperCase()}`.toLowerCase(), order });
       continue;
     }
   }
@@ -107,25 +109,33 @@ export function findOpenClawSlackOwnershipConflicts(params: {
       .map((id) => id.trim().toLowerCase())
       .filter(Boolean),
   );
-  const openClawSlackBindings = parseOpenClawSlackBindings(params.openClawConfig)
-    .filter((binding) => !ownedAgentIds.has(binding.agentId.trim().toLowerCase()));
+  const openClawSlackBindings = parseOpenClawSlackBindings(params.openClawConfig);
   if (openClawSlackBindings.length === 0) return [];
 
   const conflicts: SlackOwnershipConflict[] = [];
   for (const talk of params.talks) {
     for (const talkBinding of talkSlackBindings(talk)) {
-      for (const openClawBinding of openClawSlackBindings) {
-        if (talkBinding.accountId !== openClawBinding.accountId) continue;
-        if (!scopesConflict(talkBinding.scope, openClawBinding.scope)) continue;
-        conflicts.push({
-          talkId: talkBinding.talkId,
-          talkScope: talkBinding.scope,
-          talkAccountId: talkBinding.accountId,
-          openClawAgentId: openClawBinding.agentId,
-          openClawScope: openClawBinding.scope,
-          openClawAccountId: openClawBinding.accountId,
-        });
+      const matching = openClawSlackBindings
+        .filter((binding) =>
+          talkBinding.accountId === binding.accountId
+          && scopesConflict(talkBinding.scope, binding.scope),
+        )
+        .sort((a, b) => a.order - b.order);
+      if (matching.length === 0) continue;
+
+      const winner = matching[0];
+      if (ownedAgentIds.has(winner.agentId.trim().toLowerCase())) {
+        continue;
       }
+
+      conflicts.push({
+        talkId: talkBinding.talkId,
+        talkScope: talkBinding.scope,
+        talkAccountId: talkBinding.accountId,
+        openClawAgentId: winner.agentId,
+        openClawScope: winner.scope,
+        openClawAccountId: winner.accountId,
+      });
     }
   }
   return conflicts;

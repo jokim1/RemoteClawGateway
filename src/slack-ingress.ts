@@ -690,7 +690,7 @@ function buildSlackSessionKey(params: {
   const threadId = sanitizeSessionPart(
     params.event.threadTs ?? params.event.messageTs ?? params.event.eventId,
   ) || 'event';
-  return `agent:${agentId}:clawtalk:talk:${talkId}:slack:channel:${channelId}:thread:${threadId}`;
+  return `agent_${agentId}_clawtalk_talk_${talkId}_slack_channel_${channelId}_thread_${threadId}`;
 }
 
 function buildInboundMessage(event: SlackIngressEvent): string {
@@ -798,6 +798,7 @@ async function callLlmForEvent(params: {
   }
 
   const json = await llmResponse.json() as {
+    model?: string;
     choices?: Array<{ message?: { content?: string } }>;
   };
   const reply = json.choices?.[0]?.message?.content?.trim() ?? '';
@@ -807,7 +808,7 @@ async function callLlmForEvent(params: {
 
   return {
     reply,
-    model,
+    model: json.model?.trim() || model,
     sessionKey,
     agentName: selectedAgent?.name,
     agentRole: selectedAgent?.role,

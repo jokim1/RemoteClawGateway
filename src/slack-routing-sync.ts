@@ -155,10 +155,8 @@ export async function reconcileSlackRoutingForTalks(talks: TalkMeta[], logger: L
     retained.push(binding);
   }
 
-  for (const entry of desired) {
-    retained.push(buildManagedBinding(entry));
-  }
-  cfg.bindings = retained;
+  const managed = desired.map((entry) => buildManagedBinding(entry));
+  cfg.bindings = [...managed, ...retained];
 
   // Ensure channels configured by talks are mention-free by default.
   const channelsRoot = ensureObjectPath(cfg, 'channels');

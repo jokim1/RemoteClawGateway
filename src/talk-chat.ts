@@ -35,28 +35,29 @@ function sanitizeSessionPart(value: string): string {
 }
 
 function resolveTalkAgentRouting(meta: { agents?: Array<{ name: string; openClawAgentId?: string }> }, requestedAgentName?: string): {
-  headerAgentId: string;
+  headerAgentId?: string;
   sessionAgentPart: string;
 } {
   const requested = requestedAgentName?.trim().toLowerCase();
   if (!requested) {
     return {
-      headerAgentId: CLAWTALK_DEFAULT_AGENT_ID,
-      sessionAgentPart: CLAWTALK_DEFAULT_AGENT_ID,
+      // No explicit per-agent routing: rely on requested model and avoid
+      // forcing a possibly-invalid OpenClaw agent id.
+      sessionAgentPart: 'talk',
     };
   }
   const matched = (meta.agents ?? []).find((agent) => agent.name.trim().toLowerCase() === requested);
-  const routed = matched?.openClawAgentId?.trim() || CLAWTALK_DEFAULT_AGENT_ID;
+  const routed = matched?.openClawAgentId?.trim();
   return {
-    headerAgentId: routed,
-    sessionAgentPart: routed,
+    headerAgentId: routed || undefined,
+    sessionAgentPart: routed || requested,
   };
 }
 
 function buildTalkSessionKey(talkId: string, agentPart: string): string {
   const talk = sanitizeSessionPart(talkId) || 'talk';
   const agent = sanitizeSessionPart(agentPart) || CLAWTALK_DEFAULT_AGENT_ID;
-  return `agent:${agent}:clawtalk:talk:${talk}:chat`;
+  return `agent_${agent}_clawtalk_talk_${talk}_chat`;
 }
 
 function estimateHistoryMessageBytes(msg: TalkMessage): number {
@@ -306,9 +307,11 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   let toolCallMessages: Array<any> = [];
   const routing = resolveTalkAgentRouting(meta, body.agentName);
   const extraHeaders: Record<string, string> = {
-    'x-openclaw-agent-id': routing.headerAgentId,
     'x-openclaw-session-key': buildTalkSessionKey(talkId, routing.sessionAgentPart),
   };
+  if (routing.headerAgentId) {
+    extraHeaders['x-openclaw-agent-id'] = routing.headerAgentId;
+  }
 
   store.setProcessing(talkId, true);
   try {
