@@ -27,6 +27,7 @@ const DEFAULT_RETRY_BASE_MS = 1_000;
 const DEFAULT_MAX_QUEUE = 1_000;
 const DEFAULT_SUPPRESS_TTL_MS = 120_000;
 const DEFAULT_SUPPRESS_MAX_CANCELS = 3;
+const DEFAULT_PROCESS_TIMEOUT_MS = 150_000;
 const SLACK_DEFAULT_ACCOUNT = 'default';
 
 type SlackIngressEvent = {
@@ -57,6 +58,7 @@ type QueueItem = {
   talkId: string;
   event: SlackIngressEvent;
   platformBindingId: string;
+  attemptToken: string;
   replyAccountId?: string;
   behaviorAgentName?: string;
   behaviorOnMessagePrompt?: string;
@@ -71,6 +73,55 @@ type QueueItem = {
   agentRole?: TalkAgent['role'];
   replySent?: boolean;
   assistantPersisted?: boolean;
+};
+
+type SlackIngressEventRuntime = {
+  eventId: string;
+  talkId: string;
+  accountId?: string;
+  channelId: string;
+  platformBindingId: string;
+  state: 'queued' | 'running' | 'retrying' | 'done' | 'failed';
+  queuedAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  attempt: number;
+  attemptToken: string;
+  retries: number;
+  replySent: boolean;
+  persisted: boolean;
+  lastError?: string;
+  lastErrorAt?: number;
+};
+
+type SlackIngressTalkCounters = {
+  handled: number;
+  passed: number;
+  queueOverflow: number;
+  delivered: number;
+  failed: number;
+  retries: number;
+};
+
+export type SlackIngressTalkRuntimeSnapshot = {
+  talkId: string;
+  inflight: number;
+  counters: SlackIngressTalkCounters;
+  recentEvents: Array<{
+    eventId: string;
+    accountId?: string;
+    channelId: string;
+    state: 'queued' | 'running' | 'retrying' | 'done' | 'failed';
+    attempt: number;
+    retries: number;
+    queuedAt: number;
+    startedAt?: number;
+    finishedAt?: number;
+    replySent: boolean;
+    persisted: boolean;
+    lastError?: string;
+    lastErrorAt?: number;
+  }>;
 };
 
 type SlackIngressDeps = {
@@ -145,6 +196,8 @@ export type MessageReceivedHookResult = { cancel: true } | undefined;
 const seenEvents = new Map<string, SeenDecision>();
 const outboundSuppressions = new Map<string, OutboundSuppressionLease>();
 const queue: QueueItem[] = [];
+const runtimeByEventId = new Map<string, SlackIngressEventRuntime>();
+const runtimeCountersByTalkId = new Map<string, SlackIngressTalkCounters>();
 let queueProcessing = false;
 
 function parseIntegerEnv(name: string, fallback: number, min = 0, max = Number.MAX_SAFE_INTEGER): number {
@@ -264,6 +317,108 @@ function getSuppressionMaxCancels(): number {
     1,
     20,
   );
+}
+
+function getProcessTimeoutMs(): number {
+  return parseIntegerEnv(
+    'CLAWTALK_INGRESS_PROCESS_TIMEOUT_MS',
+    DEFAULT_PROCESS_TIMEOUT_MS,
+    10_000,
+    600_000,
+  );
+}
+
+function getTalkCounters(talkId: string): SlackIngressTalkCounters {
+  const existing = runtimeCountersByTalkId.get(talkId);
+  if (existing) return existing;
+  const initial: SlackIngressTalkCounters = {
+    handled: 0,
+    passed: 0,
+    queueOverflow: 0,
+    delivered: 0,
+    failed: 0,
+    retries: 0,
+  };
+  runtimeCountersByTalkId.set(talkId, initial);
+  return initial;
+}
+
+function createAttemptToken(): string {
+  return randomUUID();
+}
+
+function trackEventQueued(item: QueueItem): void {
+  const now = Date.now();
+  runtimeByEventId.set(item.event.eventId, {
+    eventId: item.event.eventId,
+    talkId: item.talkId,
+    accountId: item.event.accountId,
+    channelId: item.event.channelId,
+    platformBindingId: item.platformBindingId,
+    state: 'queued',
+    queuedAt: now,
+    attempt: item.attempt,
+    attemptToken: item.attemptToken,
+    retries: 0,
+    replySent: false,
+    persisted: false,
+  });
+}
+
+function trackEventRunning(item: QueueItem): void {
+  const runtime = runtimeByEventId.get(item.event.eventId);
+  if (!runtime) return;
+  runtime.state = 'running';
+  runtime.startedAt = Date.now();
+  runtime.attempt = item.attempt;
+  runtime.attemptToken = item.attemptToken;
+}
+
+function trackEventDelivered(item: QueueItem): void {
+  const runtime = runtimeByEventId.get(item.event.eventId);
+  if (!runtime) return;
+  runtime.state = 'done';
+  runtime.finishedAt = Date.now();
+  runtime.replySent = true;
+  runtime.persisted = true;
+}
+
+function trackEventRetry(item: QueueItem, err: unknown): void {
+  const runtime = runtimeByEventId.get(item.event.eventId);
+  if (!runtime) return;
+  runtime.state = 'retrying';
+  runtime.attempt = item.attempt + 1;
+  runtime.retries += 1;
+  runtime.lastError = err instanceof Error ? err.message : String(err);
+  runtime.lastErrorAt = Date.now();
+}
+
+function trackEventFailed(item: QueueItem, err: unknown): void {
+  const runtime = runtimeByEventId.get(item.event.eventId);
+  if (!runtime) return;
+  runtime.state = 'failed';
+  runtime.finishedAt = Date.now();
+  runtime.lastError = err instanceof Error ? err.message : String(err);
+  runtime.lastErrorAt = Date.now();
+}
+
+function isAttemptCurrent(item: QueueItem): boolean {
+  const runtime = runtimeByEventId.get(item.event.eventId);
+  if (!runtime) return true;
+  return runtime.attemptToken === item.attemptToken;
+}
+
+async function runWithTimeout<T>(work: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+    timer?.unref?.();
+  });
+  try {
+    return await Promise.race([work, timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function pruneSeenEvents(now = Date.now()): void {
@@ -809,6 +964,9 @@ async function sendFailureNotice(params: {
 }
 
 async function processQueueItem(item: QueueItem, deps: SlackIngressDeps): Promise<void> {
+  if (!isAttemptCurrent(item)) {
+    throw new Error('stale attempt superseded by newer retry');
+  }
   await ensureInboundMessage(item, deps);
 
   if (!item.reply || !item.sessionKey || !item.model) {
@@ -826,6 +984,9 @@ async function processQueueItem(item: QueueItem, deps: SlackIngressDeps): Promis
     item.agentRole = generated.agentRole;
   }
 
+  if (!isAttemptCurrent(item)) {
+    throw new Error('stale attempt superseded by newer retry');
+  }
   if (!item.replySent) {
     const reply = item.reply;
     const sessionKey = item.sessionKey;
@@ -842,6 +1003,9 @@ async function processQueueItem(item: QueueItem, deps: SlackIngressDeps): Promis
     item.replySent = true;
   }
 
+  if (!isAttemptCurrent(item)) {
+    throw new Error('stale attempt superseded by newer retry');
+  }
   await persistAssistantResult(item, deps);
 }
 
@@ -862,7 +1026,11 @@ function scheduleRetry(item: QueueItem, deps: SlackIngressDeps, err: unknown): v
 
   const baseDelay = parseIntegerEnv('CLAWTALK_INGRESS_RETRY_BASE_MS', DEFAULT_RETRY_BASE_MS, 100, 60_000);
   const delayMs = Math.min(60_000, baseDelay * (2 ** item.attempt));
-  const retryItem: QueueItem = { ...item, attempt: nextAttempt };
+  const retryItem: QueueItem = { ...item, attempt: nextAttempt, attemptToken: createAttemptToken() };
+  const runtime = runtimeByEventId.get(item.event.eventId);
+  if (runtime) {
+    runtime.attemptToken = retryItem.attemptToken;
+  }
   const timer = setTimeout(() => {
     queue.push(retryItem);
     void processQueue(deps);
@@ -878,9 +1046,25 @@ async function processQueue(deps: SlackIngressDeps): Promise<void> {
       const item = queue.shift();
       if (!item) continue;
       try {
-        await processQueueItem(item, deps);
+        trackEventRunning(item);
+        await runWithTimeout(
+          processQueueItem(item, deps),
+          getProcessTimeoutMs(),
+          `SlackIngress event ${item.event.eventId}`,
+        );
+        trackEventDelivered(item);
+        getTalkCounters(item.talkId).delivered += 1;
         deps.logger.debug(`SlackIngress: delivered reply for event ${item.event.eventId} (talk ${item.talkId})`);
       } catch (err) {
+        const maxAttempts = parseIntegerEnv('CLAWTALK_INGRESS_RETRY_ATTEMPTS', DEFAULT_RETRY_ATTEMPTS, 1, 10);
+        const nextAttempt = item.attempt + 1;
+        if (nextAttempt >= maxAttempts) {
+          trackEventFailed(item, err);
+          getTalkCounters(item.talkId).failed += 1;
+        } else {
+          trackEventRetry(item, err);
+          getTalkCounters(item.talkId).retries += 1;
+        }
         deps.logger.warn(
           `SlackIngress: processing failed for ${item.event.eventId} (attempt ${item.attempt + 1}): ${String(err)}`,
         );
@@ -925,6 +1109,9 @@ function routeSlackIngressEvent(
         `channel=${event.channelId} reason=${reason}`,
       );
     }
+    if (ownership.talkId) {
+      getTalkCounters(ownership.talkId).passed += 1;
+    }
     seenEvents.set(event.eventId, {
       ts: Date.now(),
       decision: 'pass',
@@ -947,6 +1134,7 @@ function routeSlackIngressEvent(
       `SlackIngress: dropping event due to queue overflow event=${event.eventId} ` +
       `account=${event.accountId ?? 'unknown'} channel=${event.channelId} maxQueue=${maxQueue}`,
     );
+    getTalkCounters(ownership.talkId).queueOverflow += 1;
     seenEvents.set(event.eventId, {
       ts: Date.now(),
       decision: 'pass',
@@ -967,6 +1155,7 @@ function routeSlackIngressEvent(
     decision: 'handled',
     talkId: ownership.talkId,
   });
+  getTalkCounters(ownership.talkId).handled += 1;
   deps.logger.debug(
     `SlackIngress: handled event=${event.eventId} account=${event.accountId ?? 'unknown'} ` +
     `channel=${event.channelId} talk=${ownership.talkId} binding=${ownership.bindingId}`,
@@ -974,17 +1163,20 @@ function routeSlackIngressEvent(
   upsertOutboundSuppression(event, ownership.talkId);
   const ownerTalk = deps.store.getTalk(ownership.talkId);
   const ownerBinding = ownerTalk?.platformBindings?.find((binding) => binding.id === ownership.bindingId);
-  queue.push({
+  const queuedItem: QueueItem = {
     talkId: ownership.talkId,
     event,
     platformBindingId: ownership.bindingId,
+    attemptToken: createAttemptToken(),
     replyAccountId: event.accountId ?? ownerBinding?.accountId,
     behaviorAgentName: ownership.behaviorAgentName,
     behaviorOnMessagePrompt: ownership.behaviorOnMessagePrompt,
     attempt: 0,
     enqueuedAt: Date.now(),
     inboundContent: buildInboundMessage(event),
-  });
+  };
+  queue.push(queuedItem);
+  trackEventQueued(queuedItem);
   if (deps.autoProcessQueue !== false) {
     void processQueue(deps);
   }
@@ -1187,6 +1379,38 @@ export async function handleSlackIngress(
 export function __resetSlackIngressStateForTests(): void {
   seenEvents.clear();
   outboundSuppressions.clear();
+  runtimeByEventId.clear();
+  runtimeCountersByTalkId.clear();
   queue.length = 0;
   queueProcessing = false;
+}
+
+export function getSlackIngressTalkRuntimeSnapshot(talkId: string): SlackIngressTalkRuntimeSnapshot {
+  const counters = getTalkCounters(talkId);
+  const events = Array.from(runtimeByEventId.values())
+    .filter((event) => event.talkId === talkId)
+    .sort((a, b) => b.queuedAt - a.queuedAt)
+    .slice(0, 10)
+    .map((event) => ({
+      eventId: event.eventId,
+      accountId: event.accountId,
+      channelId: event.channelId,
+      state: event.state,
+      attempt: event.attempt,
+      retries: event.retries,
+      queuedAt: event.queuedAt,
+      startedAt: event.startedAt,
+      finishedAt: event.finishedAt,
+      replySent: event.replySent,
+      persisted: event.persisted,
+      lastError: event.lastError,
+      lastErrorAt: event.lastErrorAt,
+    }));
+  const inflight = events.filter((event) => event.state === 'queued' || event.state === 'running' || event.state === 'retrying').length;
+  return {
+    talkId,
+    inflight,
+    counters: { ...counters },
+    recentEvents: events,
+  };
 }

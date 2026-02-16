@@ -7,6 +7,7 @@
 
 import type { PluginApi } from './types.js';
 import type { TalkStore } from './talk-store.js';
+import { getSlackIngressTalkRuntimeSnapshot } from './slack-ingress.js';
 
 export function registerCommands(api: PluginApi, talkStore: TalkStore): void {
   // /talks — list active talks
@@ -69,6 +70,19 @@ export function registerCommands(api: PluginApi, talkStore: TalkStore): void {
 
       if (talk.objective) {
         lines.push(`Objectives: ${talk.objective.slice(0, 200)}`);
+      }
+
+      const slackRuntime = getSlackIngressTalkRuntimeSnapshot(talk.id);
+      const recent = slackRuntime.recentEvents[0];
+      lines.push(
+        `Channel Delivery: inflight=${slackRuntime.inflight} delivered=${slackRuntime.counters.delivered} ` +
+        `failed=${slackRuntime.counters.failed} retries=${slackRuntime.counters.retries}`,
+      );
+      if (recent) {
+        lines.push(
+          `Last Channel Event: ${recent.state} channel=${recent.channelId} attempt=${recent.attempt + 1}` +
+          `${recent.lastError ? ` error="${recent.lastError.slice(0, 120)}"` : ''}`,
+        );
       }
 
       ctx.reply(lines.join('\n'));

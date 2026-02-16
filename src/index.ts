@@ -32,6 +32,7 @@ import { registerCommands } from './commands.js';
 import {
   handleSlackIngress,
   inspectSlackOwnership,
+  getSlackIngressTalkRuntimeSnapshot,
   handleSlackMessageReceivedHook,
   handleSlackMessageSendingHook,
 } from './slack-ingress.js';
@@ -71,6 +72,7 @@ const ROUTES = new Set([
   '/api/events/slack',
   '/api/events/slack/resolve',
   '/api/events/slack/doctor',
+  '/api/events/slack/status',
 ]);
 
 // ============================================================================
@@ -691,6 +693,22 @@ const plugin = {
               ok: conflicts.length === 0,
               conflictCount: conflicts.length,
               conflicts,
+            });
+            break;
+          }
+          case '/api/events/slack/status': {
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              break;
+            }
+            const talkId = url.searchParams.get('talkId')?.trim();
+            if (talkId) {
+              sendJson(res, 200, getSlackIngressTalkRuntimeSnapshot(talkId));
+              break;
+            }
+            const talks = talkStore.listTalks();
+            sendJson(res, 200, {
+              talks: talks.map((talk) => getSlackIngressTalkRuntimeSnapshot(talk.id)),
             });
             break;
           }

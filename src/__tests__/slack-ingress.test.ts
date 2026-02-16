@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   __resetSlackIngressStateForTests,
+  getSlackIngressTalkRuntimeSnapshot,
   handleSlackMessageReceivedHook,
   handleSlackMessageSendingHook,
   inspectSlackOwnership,
@@ -368,5 +369,95 @@ describe('slack ingress ownership hooks', () => {
     expect(inspected.decision).toBe('handled');
     expect(inspected.talkId).toBe(talkId);
     expect(inspected.bindingId).toBe(bindingId);
+  });
+
+  it('passes when autoRespond is explicitly disabled for a binding', async () => {
+    const { talkId, bindingId } = addSlackBindingWithId('channel:c555');
+    store.updateTalk(talkId, {
+      platformBehaviors: [{
+        id: 'behavior-disabled',
+        platformBindingId: bindingId,
+        autoRespond: false,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }],
+    });
+
+    const hookResult = await handleSlackMessageReceivedHook(
+      {
+        from: 'slack:channel:C555',
+        content: 'hello',
+        metadata: {
+          to: 'channel:C555',
+          messageId: '1700000010.100',
+          senderId: 'U555',
+        },
+      },
+      {
+        channelId: 'slack',
+      },
+      buildDeps(),
+    );
+    expect(hookResult).toBeUndefined();
+  });
+
+  it('uses binding account fallback when inbound event account is missing', async () => {
+    const talk = store.createTalk('test-model');
+    const bindingId = 'binding-account-fallback';
+    store.updateTalk(talk.id, {
+      platformBindings: [{
+        id: bindingId,
+        platform: 'slack',
+        accountId: 'kimfamily',
+        scope: 'channel:c777',
+        permission: 'read+write',
+        createdAt: Date.now(),
+      }],
+    });
+
+    const sendSlackMessage = jest.fn(async (_params: { accountId?: string; channelId: string; threadTs?: string; message: string }) => true);
+    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: 'ack' } }],
+      }),
+    } as unknown as Response);
+    try {
+      const deps = {
+        ...buildDeps(),
+        autoProcessQueue: true,
+        sendSlackMessage,
+      };
+
+      const hookResult = await handleSlackMessageReceivedHook(
+        {
+          from: 'slack:channel:C777',
+          content: 'progress update',
+          metadata: {
+            to: 'channel:C777',
+            messageId: '1700000011.100',
+            senderId: 'U777',
+          },
+        },
+        {
+          channelId: 'slack',
+        },
+        deps,
+      );
+      expect(hookResult).toEqual({ cancel: true });
+
+      for (let i = 0; i < 40 && sendSlackMessage.mock.calls.length === 0; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      expect(sendSlackMessage).toHaveBeenCalled();
+      const firstCall = sendSlackMessage.mock.calls[0]?.[0] as { accountId?: string } | undefined;
+      expect(firstCall?.accountId).toBe('kimfamily');
+
+      const runtime = getSlackIngressTalkRuntimeSnapshot(talk.id);
+      expect(runtime.counters.handled).toBeGreaterThanOrEqual(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });
