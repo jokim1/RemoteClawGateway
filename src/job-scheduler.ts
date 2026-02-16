@@ -656,6 +656,7 @@ Provide a concise report of your findings or actions. Start with a one-line summ
       messages,
       model,
       tools,
+      toolChoice: 'auto',
       gatewayOrigin,
       authToken,
       executor,

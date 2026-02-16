@@ -77,7 +77,7 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
         '### Available Tools\n' +
         toolLines.join('\n') + overflow + '\n\n' +
         '### Tool Usage Guidelines\n' +
-        '- **Use tools proactively** when the user asks you to perform actions (file ops, web requests, installations, etc.).\n' +
+        '- Use tools only when the user asks for external actions or verification (file ops, web requests, installs, code execution).\n' +
         '- **Do not use tools** for simple conversational/meta questions (e.g., "what model are you?", greetings, clarifications).\n' +
         '- If a tool call fails, tell the user what happened and suggest alternatives.\n' +
         '- For multi-step tasks, chain tool calls as needed — you can call tools multiple times in sequence.\n' +

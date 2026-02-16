@@ -809,6 +809,7 @@ async function callLlmForEvent(params: {
     body: JSON.stringify({
       model,
       messages,
+      tool_choice: 'none',
       stream: false,
     }),
     signal: AbortSignal.timeout(LLM_TIMEOUT_MS),

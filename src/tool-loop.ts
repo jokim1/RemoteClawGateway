@@ -125,6 +125,7 @@ export interface ToolLoopStreamOptions {
   timeoutMs?: number;
   maxTotalMs?: number;
   maxIterations?: number;
+  toolChoice?: 'auto' | 'none';
   /** Signal that fires when the HTTP client disconnects. Not retried. */
   clientSignal?: AbortSignal;
   /** Correlation id for model routing diagnostics. */
@@ -211,6 +212,7 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
             model,
             messages,
             tools: tools.length > 0 ? tools : undefined,
+            tool_choice: opts.toolChoice,
             stream: true,
             stream_options: { include_usage: true },
           }),
@@ -451,6 +453,7 @@ export interface ToolLoopNonStreamOptions {
   executor: ToolExecutor;
   logger: Logger;
   timeoutMs?: number;
+  toolChoice?: 'auto' | 'none';
 }
 
 export interface ToolLoopNonStreamResult {
@@ -481,6 +484,7 @@ export async function runToolLoopNonStreaming(opts: ToolLoopNonStreamOptions): P
         model,
         messages,
         tools: tools.length > 0 ? tools : undefined,
+        tool_choice: opts.toolChoice,
         stream: false,
       }),
       signal: AbortSignal.timeout(timeoutMs),

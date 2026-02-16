@@ -110,6 +110,7 @@ async function doContextUpdate(opts: ContextUpdateOptions): Promise<void> {
       model,
       messages: [{ role: 'user', content: prompt }],
       max_tokens: 800,
+      tool_choice: 'none',
       stream: false,
     }),
     signal: AbortSignal.timeout(30_000),

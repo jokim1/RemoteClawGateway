@@ -54,6 +54,18 @@ function isModelIdentityQuestion(message: string): boolean {
   );
 }
 
+function isLikelyActionRequest(message: string): boolean {
+  const text = message.trim().toLowerCase();
+  if (!text) return false;
+  return (
+    /\b(run|execute|install|build|test|debug|fix|patch|edit|create|delete|remove|update)\b/.test(text)
+    || /\b(search|look up|research|fetch|download|upload|open|read|write)\b/.test(text)
+    || /\b(file|files|code|command|terminal|shell|api|curl|http|https|json)\b/.test(text)
+    || /^\/\w+/.test(text)
+    || /```/.test(text)
+  );
+}
+
 function sanitizeSessionPart(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_').slice(0, 96);
 }
@@ -195,6 +207,12 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     store.updateTalk(talkId, { model: body.model });
   }
 
+  // Per-turn tool policy:
+  // - Model identity/meta questions use deterministic server-side answer.
+  // - Other turns get tools only when the user likely requested actions.
+  const isModelQuestion = isModelIdentityQuestion(body.message);
+  const enableToolsForTurn = !isModelQuestion && isLikelyActionRequest(body.message);
+
   // Load context and pinned messages
   const contextMd = await store.getContextMd(talkId);
   const pinnedMessages: TalkMessage[] = [];
@@ -216,7 +234,7 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     pinnedMessages,
     activeModel: model,
     agentOverride,
-    registry,
+    registry: enableToolsForTurn ? registry : undefined,
   });
 
   // Load recent history and adapt the included window to fit context budget.
@@ -330,12 +348,13 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   // Inject the user message ID as a custom SSE event so the client can reference it
   res.write(`event: meta\ndata: ${JSON.stringify({ userMessageId: userMsg.id })}\n\n`);
 
-  // Tool policy: simple model-identity/meta questions should not trigger tool chains.
-  const disableTools = isModelIdentityQuestion(body.message);
+  // Tool policy derived above and mirrored in prompt composition.
+  const disableTools = !enableToolsForTurn;
   const tools = disableTools ? [] : registry.getToolSchemas();
   const maxIterations = disableTools ? 2 : undefined;
   if (disableTools) {
-    logger.info(`TalkChat: tool bypass for model/meta question talkId=${talkId}`);
+    const reason = isModelQuestion ? 'model-meta' : 'non-action-turn';
+    logger.info(`TalkChat: tool bypass (${reason}) talkId=${talkId}`);
   }
 
   let fullContent = '';
@@ -369,6 +388,49 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     + `matchedRequestedModelAgentModel=${routeDiag.matchedRequestedModelAgentModel ?? '-'} notes=${routeDiag.notes.join(',') || '-'}`,
   );
 
+  if (isModelQuestion) {
+    const effectiveAgentId = resolvedHeaderAgentId ?? routeDiag.configuredAgentId ?? '-';
+    const effectiveAgentModel = routeDiag.matchedRequestedModelAgentModel
+      ?? routeDiag.configuredAgentModel
+      ?? routeDiag.defaultAgentModel
+      ?? model;
+    const directReply =
+      `Requested model: ${model}\n` +
+      `Effective agent route: ${effectiveAgentId}\n` +
+      `Effective agent model: ${effectiveAgentModel}`;
+
+    // Return deterministic model-routing truth without invoking the LLM.
+    res.write(`data: ${JSON.stringify({
+      choices: [{ delta: { content: directReply } }],
+      model,
+    })}\n\n`);
+    const assistantMsg: TalkMessage = {
+      id: randomUUID(),
+      role: 'assistant',
+      content: directReply,
+      timestamp: Date.now(),
+      model,
+      ...(body.agentName && { agentName: body.agentName }),
+      ...(body.agentRole && { agentRole: body.agentRole as any }),
+    };
+    await store.appendMessage(talkId, assistantMsg);
+    scheduleContextUpdate({
+      talkId,
+      userMessage: body.message,
+      assistantResponse: directReply,
+      model,
+      gatewayOrigin,
+      authToken,
+      store,
+      logger,
+    });
+    if (!res.writableEnded) {
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }
+    return;
+  }
+
   store.setProcessing(talkId, true);
   try {
     const result = await runToolLoop({
@@ -387,6 +449,7 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
       timeoutMs: resolveTalkToolLoopTimeoutMs(),
       maxTotalMs: resolveTalkToolLoopTimeoutMs(),
       maxIterations,
+      toolChoice: disableTools ? 'none' : 'auto',
     });
 
     fullContent = result.fullContent;
