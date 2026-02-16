@@ -38,6 +38,7 @@ import {
 } from './slack-ingress.js';
 import { normalizeSlackBindingScope } from './talks.js';
 import { findOpenClawSlackOwnershipConflicts } from './slack-ownership-doctor.js';
+import { reconcileSlackRoutingForTalks } from './slack-routing-sync.js';
 
 // ---------------------------------------------------------------------------
 // Node.js 25 fetch fix — replace built-in undici connector to fix Tailscale IP
@@ -309,7 +310,9 @@ const plugin = {
 
     // Initialize Talk store (async)
     const talkStore = new TalkStore(pluginCfg.dataDir, api.logger);
-    talkStore.init().catch(err => api.logger.error(`TalkStore init failed: ${err}`));
+    talkStore.init()
+      .then(() => reconcileSlackRoutingForTalks(talkStore.listTalks(), api.logger))
+      .catch(err => api.logger.error(`TalkStore init failed: ${err}`));
 
     const logSlackOwnershipConflicts = () => {
       const cfg0 = api.runtime.config.loadConfig();
@@ -449,6 +452,7 @@ const plugin = {
     api.on('gateway_start', () => {
       refreshSlackIngressRoute();
       logSlackOwnershipConflicts();
+      void reconcileSlackRoutingForTalks(talkStore.listTalks(), api.logger);
       api.logger.info('ClawTalk: gateway_start event received');
     });
 
