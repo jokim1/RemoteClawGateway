@@ -21,6 +21,9 @@ const EVENT_TTL_MS = 6 * 60 * 60_000;
 const DEFAULT_RETRY_ATTEMPTS = 3;
 const DEFAULT_RETRY_BASE_MS = 1_000;
 const DEFAULT_MAX_QUEUE = 1_000;
+const DEFAULT_SUPPRESS_TTL_MS = 120_000;
+const DEFAULT_SUPPRESS_MAX_CANCELS = 3;
+const SLACK_DEFAULT_ACCOUNT = 'default';
 
 type SlackIngressEvent = {
   eventId: string;
@@ -31,6 +34,11 @@ type SlackIngressEvent = {
   messageTs?: string;
   userId?: string;
   userName?: string;
+  /**
+   * Expected OpenClaw outbound target for this conversation (e.g. channel:C123, user:U123).
+   * Used to suppress OpenClaw replies when ClawTalk owns the event.
+   */
+  outboundTarget?: string;
   text: string;
 };
 
@@ -62,9 +70,61 @@ type SlackIngressDeps = {
   gatewayOrigin: string;
   authToken: string | undefined;
   logger: Logger;
+  /**
+   * Optional direct Slack sender. When provided, replies bypass OpenClaw outbound hooks.
+   */
+  sendSlackMessage?: (params: {
+    accountId?: string;
+    channelId: string;
+    threadTs?: string;
+    message: string;
+  }) => Promise<boolean>;
+  /**
+   * Set false in tests to enqueue ownership decisions without running the async queue.
+   */
+  autoProcessQueue?: boolean;
+};
+
+type OutboundSuppressionLease = {
+  eventId: string;
+  talkId: string;
+  target: string;
+  accountId?: string;
+  createdAt: number;
+  expiresAt: number;
+  remainingCancels: number;
+};
+
+type SlackOwnershipDecision = {
+  decision: 'handled' | 'pass';
+  eventId: string;
+  talkId?: string;
+  reason?: string;
+  queued?: boolean;
+  duplicate?: boolean;
+};
+
+export type MessageReceivedHookEvent = {
+  from: string;
+  content: string;
+  timestamp?: number;
+  metadata?: Record<string, unknown>;
+};
+
+export type MessageHookContext = {
+  channelId: string;
+  accountId?: string;
+  conversationId?: string;
+};
+
+export type MessageSendingHookEvent = {
+  to: string;
+  content: string;
+  metadata?: Record<string, unknown>;
 };
 
 const seenEvents = new Map<string, SeenDecision>();
+const outboundSuppressions = new Map<string, OutboundSuppressionLease>();
 const queue: QueueItem[] = [];
 let queueProcessing = false;
 
@@ -82,12 +142,93 @@ function normalizeText(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : undefined;
+}
+
+function normalizeTarget(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.toLowerCase();
+}
+
+function parseSlackTargetId(target: string | undefined): string | undefined {
+  const normalized = normalizeText(target);
+  if (!normalized) return undefined;
+  if (normalized.includes(':')) {
+    const parts = normalized.split(':');
+    const maybeId = parts[parts.length - 1]?.trim();
+    return maybeId || undefined;
+  }
+  return normalized;
+}
+
+function parseSlackFromId(from: string | undefined): string | undefined {
+  const normalized = normalizeText(from);
+  if (!normalized) return undefined;
+  const parts = normalized.split(':');
+  if (parts.length >= 3) {
+    return parts.slice(2).join(':') || undefined;
+  }
+  if (parts.length === 2) {
+    return parts[1] || undefined;
+  }
+  return undefined;
+}
+
+function buildDefaultOutboundTarget(channelId: string): string {
+  return `channel:${channelId}`;
+}
+
+function buildSuppressionKey(accountId: string | undefined, target: string): string {
+  return `slack:${(accountId ?? SLACK_DEFAULT_ACCOUNT).trim().toLowerCase()}:${target.toLowerCase()}`;
+}
+
+function getSuppressionTtlMs(): number {
+  return parseIntegerEnv('CLAWTALK_INGRESS_SUPPRESS_TTL_MS', DEFAULT_SUPPRESS_TTL_MS, 5_000, 3_600_000);
+}
+
+function getSuppressionMaxCancels(): number {
+  return parseIntegerEnv(
+    'CLAWTALK_INGRESS_SUPPRESS_MAX_CANCELS',
+    DEFAULT_SUPPRESS_MAX_CANCELS,
+    1,
+    20,
+  );
+}
+
 function pruneSeenEvents(now = Date.now()): void {
   for (const [key, value] of seenEvents) {
     if (now - value.ts > EVENT_TTL_MS) {
       seenEvents.delete(key);
     }
   }
+}
+
+function pruneOutboundSuppressions(now = Date.now()): void {
+  for (const [key, lease] of outboundSuppressions) {
+    if (lease.expiresAt <= now || lease.remainingCancels <= 0) {
+      outboundSuppressions.delete(key);
+    }
+  }
+}
+
+function upsertOutboundSuppression(event: SlackIngressEvent, talkId: string): void {
+  const normalizedTarget = normalizeTarget(event.outboundTarget ?? buildDefaultOutboundTarget(event.channelId));
+  if (!normalizedTarget) return;
+
+  const now = Date.now();
+  const key = buildSuppressionKey(event.accountId, normalizedTarget);
+  outboundSuppressions.set(key, {
+    eventId: event.eventId,
+    talkId,
+    target: normalizedTarget,
+    accountId: event.accountId,
+    createdAt: now,
+    expiresAt: now + getSuppressionTtlMs(),
+    remainingCancels: getSuppressionMaxCancels(),
+  });
 }
 
 function buildEventId(input: {
@@ -120,6 +261,9 @@ function parseSlackIngressEvent(raw: unknown): SlackIngressEvent | null {
   const messageTs = normalizeText(body.messageTs);
   const threadTs = normalizeText(body.threadTs);
   const userId = normalizeText(body.userId);
+  const outboundTarget =
+    normalizeText(body.outboundTarget) ??
+    (channelId ? buildDefaultOutboundTarget(channelId) : undefined);
   const eventId =
     normalizeText(body.eventId) ??
     buildEventId({
@@ -139,6 +283,7 @@ function parseSlackIngressEvent(raw: unknown): SlackIngressEvent | null {
     messageTs,
     userId,
     userName: normalizeText(body.userName),
+    outboundTarget,
     text,
   };
 }
@@ -171,12 +316,21 @@ function scoreSlackBinding(binding: PlatformBinding, event: SlackIngressEvent): 
 
   const channelId = event.channelId.trim().toLowerCase();
   const channelName = normalizeChannelName(event.channelName);
+  const outboundTarget = normalizeTarget(event.outboundTarget);
 
   if (scope === '*' || scope === 'all' || scope === 'slack:*') {
     return 10;
   }
-  if (scope === channelId || scope === `channel:${channelId}` || scope === `slack:${channelId}`) {
+  if (
+    scope === channelId ||
+    scope === `channel:${channelId}` ||
+    scope === `user:${channelId}` ||
+    scope === `slack:${channelId}`
+  ) {
     return 100;
+  }
+  if (outboundTarget && (scope === outboundTarget || scope === `slack:${outboundTarget}`)) {
+    return 95;
   }
   if (channelName) {
     if (scope === `#${channelName}` || scope === channelName) {
@@ -414,6 +568,19 @@ async function sendSlackReply(params: {
   message: string;
   sessionKey: string;
 }): Promise<void> {
+  if (params.deps.sendSlackMessage) {
+    const sent = await params.deps.sendSlackMessage({
+      accountId: params.event.accountId,
+      channelId: params.event.channelId,
+      threadTs: params.event.threadTs,
+      message: params.message,
+    });
+    if (!sent) {
+      throw new Error('slack send callback returned false');
+    }
+    return;
+  }
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'x-openclaw-message-channel': 'slack',
@@ -578,6 +745,203 @@ async function processQueue(deps: SlackIngressDeps): Promise<void> {
   }
 }
 
+function routeSlackIngressEvent(
+  event: SlackIngressEvent,
+  deps: SlackIngressDeps,
+): { statusCode: number; payload: SlackOwnershipDecision } {
+  pruneSeenEvents();
+  pruneOutboundSuppressions();
+
+  const seen = seenEvents.get(event.eventId);
+  if (seen) {
+    if (seen.decision === 'handled' && seen.talkId) {
+      upsertOutboundSuppression(event, seen.talkId);
+    }
+    return {
+      statusCode: 200,
+      payload: {
+        decision: seen.decision,
+        talkId: seen.talkId,
+        reason: seen.reason,
+        eventId: event.eventId,
+        duplicate: true,
+      },
+    };
+  }
+
+  const owner = resolveOwnerTalk(deps.store.listTalks(), event, deps.logger);
+  if (!owner.talkId) {
+    const reason = owner.reason ?? 'no-binding';
+    seenEvents.set(event.eventId, {
+      ts: Date.now(),
+      decision: 'pass',
+      reason,
+    });
+    return {
+      statusCode: 200,
+      payload: {
+        decision: 'pass',
+        reason,
+        eventId: event.eventId,
+      },
+    };
+  }
+
+  const maxQueue = parseIntegerEnv('CLAWTALK_INGRESS_MAX_QUEUE', DEFAULT_MAX_QUEUE, 10, 100_000);
+  if (queue.length >= maxQueue) {
+    const reason = 'queue-overflow';
+    seenEvents.set(event.eventId, {
+      ts: Date.now(),
+      decision: 'pass',
+      reason,
+    });
+    return {
+      statusCode: 200,
+      payload: {
+        decision: 'pass',
+        reason,
+        eventId: event.eventId,
+      },
+    };
+  }
+
+  seenEvents.set(event.eventId, {
+    ts: Date.now(),
+    decision: 'handled',
+    talkId: owner.talkId,
+  });
+  upsertOutboundSuppression(event, owner.talkId);
+  queue.push({
+    talkId: owner.talkId,
+    event,
+    attempt: 0,
+    enqueuedAt: Date.now(),
+    inboundContent: buildInboundMessage(event),
+  });
+  if (deps.autoProcessQueue !== false) {
+    void processQueue(deps);
+  }
+
+  return {
+    statusCode: 202,
+    payload: {
+      decision: 'handled',
+      talkId: owner.talkId,
+      eventId: event.eventId,
+      queued: true,
+    },
+  };
+}
+
+function parseSlackMessageReceivedHookEvent(
+  event: MessageReceivedHookEvent,
+  ctx: MessageHookContext,
+): SlackIngressEvent | null {
+  if (ctx.channelId.trim().toLowerCase() !== 'slack') {
+    return null;
+  }
+
+  const text = normalizeText(event.content);
+  if (!text) {
+    return null;
+  }
+
+  const metadata = asRecord(event.metadata);
+  const outboundTarget = normalizeText(metadata?.to) ?? normalizeText(ctx.conversationId);
+  const channelId = parseSlackTargetId(outboundTarget) ?? parseSlackFromId(event.from);
+  if (!channelId) {
+    return null;
+  }
+
+  const accountId = normalizeText(ctx.accountId) ?? normalizeText(metadata?.accountId);
+  const threadTs = normalizeText(metadata?.threadId);
+  const messageTs =
+    normalizeText(metadata?.messageId) ??
+    (typeof event.timestamp === 'number' && Number.isFinite(event.timestamp)
+      ? String(Math.floor(event.timestamp))
+      : undefined);
+  const userId = normalizeText(metadata?.senderId);
+  const userName = normalizeText(metadata?.senderName) ?? normalizeText(metadata?.senderUsername);
+
+  return {
+    eventId: buildEventId({
+      channelId,
+      accountId,
+      messageTs,
+      threadTs,
+      userId,
+    }),
+    accountId,
+    channelId,
+    threadTs,
+    messageTs,
+    userId,
+    userName,
+    outboundTarget: outboundTarget ?? buildDefaultOutboundTarget(channelId),
+    text,
+  };
+}
+
+function consumeOutboundSuppression(
+  event: MessageSendingHookEvent,
+  ctx: MessageHookContext,
+): OutboundSuppressionLease | undefined {
+  if (ctx.channelId.trim().toLowerCase() !== 'slack') {
+    return undefined;
+  }
+
+  pruneOutboundSuppressions();
+  const target = normalizeTarget(event.to);
+  if (!target) {
+    return undefined;
+  }
+
+  const metadata = asRecord(event.metadata);
+  const accountId = normalizeText(metadata?.accountId) ?? normalizeText(ctx.accountId);
+  const candidateKeys = accountId
+    ? [buildSuppressionKey(accountId, target), buildSuppressionKey(undefined, target)]
+    : [buildSuppressionKey(undefined, target)];
+  const matchedKey = candidateKeys.find((key) => outboundSuppressions.has(key));
+  if (!matchedKey) {
+    return undefined;
+  }
+  const lease = outboundSuppressions.get(matchedKey);
+  if (!lease) {
+    return undefined;
+  }
+
+  lease.remainingCancels -= 1;
+  if (lease.remainingCancels <= 0) {
+    outboundSuppressions.delete(matchedKey);
+  }
+  return lease;
+}
+
+export async function handleSlackMessageReceivedHook(
+  event: MessageReceivedHookEvent,
+  ctx: MessageHookContext,
+  deps: SlackIngressDeps,
+): Promise<void> {
+  const parsed = parseSlackMessageReceivedHookEvent(event, ctx);
+  if (!parsed) return;
+  routeSlackIngressEvent(parsed, deps);
+}
+
+export function handleSlackMessageSendingHook(
+  event: MessageSendingHookEvent,
+  ctx: MessageHookContext,
+  logger?: Logger,
+): { cancel: true } | undefined {
+  const lease = consumeOutboundSuppression(event, ctx);
+  if (!lease) {
+    return undefined;
+  }
+  logger?.debug(
+    `SlackIngress: suppressed OpenClaw outbound for ${lease.target} (talk ${lease.talkId}, event ${lease.eventId})`,
+  );
+  return { cancel: true };
+}
+
 export async function handleSlackIngress(
   ctx: HandlerContext,
   deps: SlackIngressDeps,
@@ -603,69 +967,13 @@ export async function handleSlackIngress(
     return;
   }
 
-  pruneSeenEvents();
-  const seen = seenEvents.get(event.eventId);
-  if (seen) {
-    sendJson(ctx.res, 200, {
-      decision: seen.decision,
-      talkId: seen.talkId,
-      reason: seen.reason,
-      eventId: event.eventId,
-      duplicate: true,
-    });
-    return;
-  }
+  const decision = routeSlackIngressEvent(event, deps);
+  sendJson(ctx.res, decision.statusCode, decision.payload);
+}
 
-  const owner = resolveOwnerTalk(deps.store.listTalks(), event, deps.logger);
-  if (!owner.talkId) {
-    const reason = owner.reason ?? 'no-binding';
-    seenEvents.set(event.eventId, {
-      ts: Date.now(),
-      decision: 'pass',
-      reason,
-    });
-    sendJson(ctx.res, 200, {
-      decision: 'pass',
-      reason,
-      eventId: event.eventId,
-    });
-    return;
-  }
-
-  const maxQueue = parseIntegerEnv('CLAWTALK_INGRESS_MAX_QUEUE', DEFAULT_MAX_QUEUE, 10, 100_000);
-  if (queue.length >= maxQueue) {
-    const reason = 'queue-overflow';
-    seenEvents.set(event.eventId, {
-      ts: Date.now(),
-      decision: 'pass',
-      reason,
-    });
-    sendJson(ctx.res, 200, {
-      decision: 'pass',
-      reason,
-      eventId: event.eventId,
-    });
-    return;
-  }
-
-  seenEvents.set(event.eventId, {
-    ts: Date.now(),
-    decision: 'handled',
-    talkId: owner.talkId,
-  });
-  queue.push({
-    talkId: owner.talkId,
-    event,
-    attempt: 0,
-    enqueuedAt: Date.now(),
-    inboundContent: buildInboundMessage(event),
-  });
-  void processQueue(deps);
-
-  sendJson(ctx.res, 202, {
-    decision: 'handled',
-    talkId: owner.talkId,
-    eventId: event.eventId,
-    queued: true,
-  });
+export function __resetSlackIngressStateForTests(): void {
+  seenEvents.clear();
+  outboundSuppressions.clear();
+  queue.length = 0;
+  queueProcessing = false;
 }

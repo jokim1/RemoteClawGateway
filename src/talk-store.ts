@@ -176,7 +176,6 @@ export class TalkStore {
       processing: false,
       directives: [],
       platformBindings: [],
-      processing: false,
       createdAt: now,
       updatedAt: now,
     };

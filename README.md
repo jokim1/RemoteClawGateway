@@ -234,7 +234,7 @@ Returns usage data for all providers. Optionally filter with `?provider=anthropi
 | `PATCH /api/talks/:id/jobs/:jobId` | Update a job |
 | `DELETE /api/talks/:id/jobs/:jobId` | Delete a job |
 | `GET /api/talks/:id/reports` | Get job execution reports |
-| `POST /api/events/slack` | Slack event claim/queue endpoint (used by OpenClaw handoff) |
+| `POST /api/events/slack` | Slack event claim/queue endpoint (backward-compatible manual ingress) |
 
 #### Slack ingress env controls
 
@@ -242,6 +242,8 @@ Returns usage data for all providers. Optionally filter with `?provider=anthropi
 - `CLAWTALK_INGRESS_RETRY_BASE_MS` (default `1000`) — base backoff for retries.
 - `CLAWTALK_INGRESS_NOTIFY_FAILURE` (default `1`) — set `0` to suppress terminal failure notice message in Slack.
 - `CLAWTALK_INGRESS_MAX_QUEUE` (default `1000`) — max in-memory queued Slack events before gateway returns `decision=pass`.
+- `CLAWTALK_INGRESS_SUPPRESS_TTL_MS` (default `120000`) — suppression lease TTL for blocking OpenClaw outbound after a claim.
+- `CLAWTALK_INGRESS_SUPPRESS_MAX_CANCELS` (default `3`) — max OpenClaw outbound sends canceled per claimed event.
 
 ### Voice endpoints
 

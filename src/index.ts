@@ -29,7 +29,11 @@ import { handleFileUpload } from './file-upload.js';
 import { ToolRegistry } from './tool-registry.js';
 import { ToolExecutor } from './tool-executor.js';
 import { registerCommands } from './commands.js';
-import { handleSlackIngress } from './slack-ingress.js';
+import {
+  handleSlackIngress,
+  handleSlackMessageReceivedHook,
+  handleSlackMessageSendingHook,
+} from './slack-ingress.js';
 
 // ---------------------------------------------------------------------------
 // Node.js 25 fetch fix — replace built-in undici connector to fix Tailscale IP
@@ -275,6 +279,41 @@ const plugin = {
     const talkStore = new TalkStore(pluginCfg.dataDir, api.logger);
     talkStore.init().catch(err => api.logger.error(`TalkStore init failed: ${err}`));
 
+    // Shared Slack reply path (direct Slack API).
+    const replyHandler = createEventReplyHandler(
+      () => api.runtime.config.loadConfig(),
+      api.logger,
+    );
+    let slackIngressOrigin = 'http://127.0.0.1:18789';
+    let slackIngressToken: string | undefined;
+    const refreshSlackIngressRoute = () => {
+      const cfg0 = api.runtime.config.loadConfig();
+      slackIngressOrigin = resolveGatewayOrigin(cfg0, api.logger);
+      slackIngressToken = resolveGatewayToken(cfg0);
+    };
+    const buildSlackIngressDeps = () => ({
+      store: talkStore,
+      gatewayOrigin: slackIngressOrigin,
+      authToken: slackIngressToken,
+      logger: api.logger,
+      sendSlackMessage: async (params: {
+        accountId?: string;
+        channelId: string;
+        threadTs?: string;
+        message: string;
+      }) =>
+        replyHandler(
+          {
+            platform: 'slack',
+            accountId: params.accountId,
+            platformChannelId: params.channelId,
+            threadId: params.threadTs,
+          },
+          params.message,
+        ),
+    });
+    refreshSlackIngressRoute();
+
     // Initialize tool registry and executor
     const toolRegistry = new ToolRegistry(pluginCfg.dataDir, api.logger);
     const toolExecutor = new ToolExecutor(toolRegistry, api.logger);
@@ -310,17 +349,11 @@ const plugin = {
     api.registerService({
       id: 'clawtalk-event-dispatcher',
       start: () => {
-        const cfg0 = api.runtime.config.loadConfig();
-        const gatewayToken0 = resolveGatewayToken(cfg0);
-        const dispatcherOrigin = resolveGatewayOrigin(cfg0, api.logger);
-        const replyHandler = createEventReplyHandler(
-          () => api.runtime.config.loadConfig(),
-          api.logger,
-        );
+        refreshSlackIngressRoute();
         eventDispatcher = new EventDispatcher({
           store: talkStore,
-          gatewayOrigin: dispatcherOrigin,
-          authToken: gatewayToken0,
+          gatewayOrigin: slackIngressOrigin,
+          authToken: slackIngressToken,
           logger: api.logger,
           registry: toolRegistry,
           executor: toolExecutor,
@@ -340,14 +373,23 @@ const plugin = {
 
     // Listen for incoming platform messages (Slack, Telegram, etc.)
     api.on('message_received', (event: any, ctx: any) => {
-      if (!eventDispatcher) return;
-      eventDispatcher.handleMessageReceived(event, ctx).catch(err => {
-        api.logger.warn(`ClawTalk: event dispatch error: ${err}`);
+      if (eventDispatcher) {
+        eventDispatcher.handleMessageReceived(event, ctx).catch(err => {
+          api.logger.warn(`ClawTalk: event dispatch error: ${err}`);
+        });
+      }
+      handleSlackMessageReceivedHook(event, ctx, buildSlackIngressDeps()).catch(err => {
+        api.logger.warn(`ClawTalk: slack ownership hook failed: ${err}`);
       });
+    });
+
+    api.on('message_sending', (event: any, ctx: any) => {
+      return handleSlackMessageSendingHook(event, ctx, api.logger);
     });
 
     // Register lifecycle hooks
     api.on('gateway_start', () => {
+      refreshSlackIngressRoute();
       api.logger.info('ClawTalk: gateway_start event received');
     });
 
@@ -533,6 +575,16 @@ const plugin = {
               gatewayOrigin,
               authToken: gatewayToken,
               logger: api.logger,
+              sendSlackMessage: async (params) =>
+                replyHandler(
+                  {
+                    platform: 'slack',
+                    accountId: params.accountId,
+                    platformChannelId: params.channelId,
+                    threadId: params.threadTs,
+                  },
+                  params.message,
+                ),
             });
             break;
           }

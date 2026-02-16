@@ -84,9 +84,16 @@ describe('Talk CRUD', () => {
 
   it('persists directives and platform bindings via updateTalk', () => {
     const talk = store.createTalk();
+    const now = Date.now();
     const updated = store.updateTalk(talk.id, {
-      directives: [{ text: 'Be concise', active: true }],
-      platformBindings: [{ platform: 'slack', scope: '#team-product', permission: 'read+write' }],
+      directives: [{ id: 'directive-1', text: 'Be concise', active: true, createdAt: now }],
+      platformBindings: [{
+        id: 'binding-1',
+        platform: 'slack',
+        scope: '#team-product',
+        permission: 'read+write',
+        createdAt: now,
+      }],
     });
 
     expect(updated).not.toBeNull();

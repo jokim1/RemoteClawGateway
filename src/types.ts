@@ -54,7 +54,7 @@ export interface PluginApi {
   ) => void;
   registerCommand: (cmd: PluginCommandDefinition) => void;
   registerService: (svc: PluginService) => void;
-  on: (hookName: string, handler: (...args: any[]) => void | Promise<void>) => void;
+  on: (hookName: string, handler: (...args: any[]) => unknown | Promise<unknown>) => void;
 }
 
 export interface HandlerContext {
