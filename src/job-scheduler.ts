@@ -27,8 +27,10 @@ const CHECK_INTERVAL_MS = 60_000; // 1 minute
 /** Default debounce for event-driven jobs. */
 export const EVENT_JOB_DEBOUNCE_MS = 5_000;
 
-/** Maximum time for a single job execution. */
-const JOB_TIMEOUT_MS = 300_000; // 5 minutes
+/** Maximum time for a single job execution (25 min).
+ *  Must exceed OpenClaw's embedded agent timeout (agents.defaults.timeoutSeconds,
+ *  currently 1200s / 20 min) so we don't abort while the agent is working. */
+const JOB_TIMEOUT_MS = 1_500_000;
 
 /** Talks with a currently running job — prevents concurrent runs. */
 const runningTalks = new Set<string>();
