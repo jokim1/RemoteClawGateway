@@ -82,6 +82,23 @@ describe('Talk CRUD', () => {
     expect(updated!.updatedAt).toBeGreaterThanOrEqual(talk.updatedAt);
   });
 
+  it('persists directives and platform bindings via updateTalk', () => {
+    const talk = store.createTalk();
+    const updated = store.updateTalk(talk.id, {
+      directives: [{ text: 'Be concise', active: true }],
+      platformBindings: [{ platform: 'slack', scope: '#team-product', permission: 'read+write' }],
+    });
+
+    expect(updated).not.toBeNull();
+    expect(updated!.directives).toHaveLength(1);
+    expect(updated!.directives?.[0].text).toBe('Be concise');
+    expect(updated!.directives?.[0].active).toBe(true);
+    expect(updated!.platformBindings).toHaveLength(1);
+    expect(updated!.platformBindings?.[0].platform).toBe('slack');
+    expect(updated!.platformBindings?.[0].scope).toBe('#team-product');
+    expect(updated!.platformBindings?.[0].permission).toBe('read+write');
+  });
+
   it('returns null when updating nonexistent talk', () => {
     expect(store.updateTalk('nonexistent', { topicTitle: 'x' })).toBeNull();
   });

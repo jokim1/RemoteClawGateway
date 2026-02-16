@@ -29,6 +29,7 @@ import { handleFileUpload } from './file-upload.js';
 import { ToolRegistry } from './tool-registry.js';
 import { ToolExecutor } from './tool-executor.js';
 import { registerCommands } from './commands.js';
+import { handleSlackIngress } from './slack-ingress.js';
 
 // ---------------------------------------------------------------------------
 // Node.js 25 fetch fix — replace built-in undici connector to fix Tailscale IP
@@ -60,6 +61,7 @@ const ROUTES = new Set([
   '/api/realtime-voice/capabilities',
   '/api/realtime-voice/stream',
   '/api/files/upload',
+  '/api/events/slack',
 ]);
 
 // ============================================================================
@@ -522,6 +524,18 @@ const plugin = {
         }
 
         switch (url.pathname) {
+          case '/api/events/slack': {
+            const host = req.headers.host ?? 'localhost:18789';
+            const gatewayOrigin = `http://${host}`;
+            const gatewayToken = resolveGatewayToken(cfg);
+            await handleSlackIngress(ctx, {
+              store: talkStore,
+              gatewayOrigin,
+              authToken: gatewayToken,
+              logger: api.logger,
+            });
+            break;
+          }
           case '/api/files/upload':
             await handleFileUpload(ctx, pluginCfg.uploadDir);
             break;

@@ -100,6 +100,15 @@ describe('isJobDue (interval schedules)', () => {
     expect(isJobDue(job)).toBe(false);
   });
 
+  it('returns false for event jobs (triggered by ingress, not scheduler)', () => {
+    const job = makeJob({
+      type: 'event',
+      schedule: 'on slack #team-product',
+      lastRunAt: Date.now() - 7_200_000,
+    });
+    expect(isJobDue(job)).toBe(false);
+  });
+
   it('falls back to createdAt when lastRunAt is absent', () => {
     const job = makeJob({
       schedule: 'every 1h',

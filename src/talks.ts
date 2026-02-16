@@ -124,7 +124,13 @@ export async function handleTalks(ctx: HandlerContext, store: TalkStore): Promis
 // ---------------------------------------------------------------------------
 
 async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<void> {
-  let body: { model?: string; topicTitle?: string; objective?: string } = {};
+  let body: {
+    model?: string;
+    topicTitle?: string;
+    objective?: string;
+    directives?: any[];
+    platformBindings?: any[];
+  } = {};
   try {
     body = (await readJsonBody(ctx.req)) as typeof body;
   } catch {
@@ -132,10 +138,14 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
   }
 
   const talk = store.createTalk(body.model);
-  if (body.topicTitle) store.updateTalk(talk.id, { topicTitle: body.topicTitle });
-  if (body.objective) store.updateTalk(talk.id, { objective: body.objective });
+  store.updateTalk(talk.id, {
+    ...(body.topicTitle ? { topicTitle: body.topicTitle } : {}),
+    ...(body.objective ? { objective: body.objective } : {}),
+    ...(body.directives !== undefined ? { directives: body.directives } : {}),
+    ...(body.platformBindings !== undefined ? { platformBindings: body.platformBindings } : {}),
+  });
 
-  sendJson(ctx.res, 201, talk);
+  sendJson(ctx.res, 201, store.getTalk(talk.id) ?? talk);
 }
 
 async function handleListTalks(ctx: HandlerContext, store: TalkStore): Promise<void> {
@@ -154,7 +164,14 @@ async function handleGetTalk(ctx: HandlerContext, store: TalkStore, talkId: stri
 }
 
 async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: string): Promise<void> {
-  let body: { topicTitle?: string; objective?: string; model?: string; agents?: any[]; directives?: any[]; platformBindings?: any[] };
+  let body: {
+    topicTitle?: string;
+    objective?: string;
+    model?: string;
+    agents?: any[];
+    directives?: any[];
+    platformBindings?: any[];
+  };
   try {
     body = (await readJsonBody(ctx.req)) as typeof body;
   } catch {
@@ -178,7 +195,13 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
     await store.setPlatformBindings(talkId, body.platformBindings);
   }
 
-  const updated = store.updateTalk(talkId, body);
+  const updated = store.updateTalk(talkId, {
+    topicTitle: body.topicTitle,
+    objective: body.objective,
+    model: body.model,
+    directives: body.directives,
+    platformBindings: body.platformBindings,
+  });
   if (!updated) {
     sendJson(ctx.res, 404, { error: 'Talk not found' });
     return;
@@ -283,7 +306,12 @@ async function handleCreateJob(ctx: HandlerContext, store: TalkStore, talkId: st
 
   // Detect event-driven jobs and validate scope against platform bindings
   const eventScope = parseEventTrigger(body.schedule);
-  let jobType: 'once' | 'recurring' | 'event' | undefined;
+  let jobType: 'once' | 'recurring' | 'event';
+  if (/^(in\s|at\s)/i.test(body.schedule)) {
+    jobType = 'once';
+  } else {
+    jobType = 'recurring';
+  }
 
   if (eventScope) {
     const bindings = talk.platformBindings ?? [];

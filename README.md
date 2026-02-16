@@ -12,7 +12,8 @@ This plugin runs on your server alongside OpenClaw. It adds HTTP endpoints that 
 - **`/api/rate-limits`** — reports usage and rate-limit data for subscription plans (e.g. Anthropic Max)
 - **`/api/talks`** — persistent conversation management (create, list, update, delete)
 - **`/api/talks/:id/chat`** — talk-aware chat with context injection and system prompts
-- **`/api/talks/:id/jobs`** — scheduled jobs (cron-based recurring prompts)
+- **`/api/talks/:id/jobs`** — talk jobs (event, one-off, and recurring)
+- **`/api/events/slack`** — Slack ingress ownership + async Talk response pipeline
 - **`/api/voice/capabilities`** — reports whether speech-to-text and text-to-speech are available
 - **`/api/voice/transcribe`** — accepts audio, returns transcribed text (OpenAI Whisper, Deepgram, or Groq)
 - **`/api/voice/synthesize`** — accepts text, returns spoken audio (OpenAI TTS, Cartesia, or ElevenLabs)
@@ -222,17 +223,25 @@ Returns usage data for all providers. Optionally filter with `?provider=anthropi
 |--------|----------|-------------|
 | `POST /api/talks` | Create a new Talk |
 | `GET /api/talks` | List all Talks |
-| `PATCH /api/talks/:id` | Update Talk metadata (title, objective, model) |
+| `PATCH /api/talks/:id` | Update Talk metadata (title, objective, model, directives, platform bindings) |
 | `DELETE /api/talks/:id` | Delete a Talk |
 | `GET /api/talks/:id/messages` | Get Talk message history |
 | `POST /api/talks/:id/chat` | Send a message with Talk context |
-| `POST /api/talks/:id/pin` | Pin a message |
+| `POST /api/talks/:id/pin/:msgId` | Pin a message |
 | `DELETE /api/talks/:id/pin/:msgId` | Unpin a message |
-| `POST /api/talks/:id/jobs` | Create a scheduled job |
+| `POST /api/talks/:id/jobs` | Create a Talk job (`on` event, one-off, or recurring) |
 | `GET /api/talks/:id/jobs` | List jobs for a Talk |
 | `PATCH /api/talks/:id/jobs/:jobId` | Update a job |
 | `DELETE /api/talks/:id/jobs/:jobId` | Delete a job |
 | `GET /api/talks/:id/reports` | Get job execution reports |
+| `POST /api/events/slack` | Slack event claim/queue endpoint (used by OpenClaw handoff) |
+
+#### Slack ingress env controls
+
+- `CLAWTALK_INGRESS_RETRY_ATTEMPTS` (default `3`) — max processing attempts per claimed event.
+- `CLAWTALK_INGRESS_RETRY_BASE_MS` (default `1000`) — base backoff for retries.
+- `CLAWTALK_INGRESS_NOTIFY_FAILURE` (default `1`) — set `0` to suppress terminal failure notice message in Slack.
+- `CLAWTALK_INGRESS_MAX_QUEUE` (default `1000`) — max in-memory queued Slack events before gateway returns `decision=pass`.
 
 ### Voice endpoints
 

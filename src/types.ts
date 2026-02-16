@@ -139,7 +139,30 @@ export interface TalkAgent {
   model: string;
   role: AgentRole;
   isPrimary: boolean;
+  /** Optional OpenClaw agent ID for explicit gateway routing. */
+  openClawAgentId?: string;
 }
+
+export interface TalkDirective {
+  id: string;
+  text: string;
+  active: boolean;
+  createdAt: number;
+}
+
+export type Directive = TalkDirective;
+
+export type PlatformPermission = 'read' | 'write' | 'read+write';
+
+export interface TalkPlatformBinding {
+  id: string;
+  platform: string;    // e.g. "slack", "posthog", "monday"
+  scope: string;       // e.g. "#team-product", "analytics", "all boards"
+  permission: PlatformPermission;
+  createdAt: number;
+}
+
+export type PlatformBinding = TalkPlatformBinding;
 
 export interface ImageAttachmentMeta {
   filename: string;
@@ -194,23 +217,6 @@ export interface JobReport {
   summary: string;
   fullOutput: string;
   tokenUsage?: { input: number; output: number };
-}
-
-export interface TalkDirective {
-  id: string;
-  text: string;
-  active: boolean;
-  createdAt: number;
-}
-
-export type PlatformPermission = 'read' | 'write' | 'read+write';
-
-export interface TalkPlatformBinding {
-  id: string;
-  platform: string;    // e.g. "slack", "posthog", "monday"
-  scope: string;       // e.g. "#team-product", "analytics", "all boards"
-  permission: PlatformPermission;
-  createdAt: number;
 }
 
 export interface TalkMeta {

@@ -311,6 +311,7 @@ export function validateSchedule(schedule: string): string | null {
  */
 export function isJobDue(job: TalkJob): boolean {
   if (!job.active) return false;
+  if (job.type === 'event' || /^on\s+/i.test(job.schedule)) return false;
 
   // Event-driven jobs are never "due" on the cron loop — they fire via EventDispatcher
   if (job.type === 'event' || parseEventTrigger(job.schedule) !== null) return false;

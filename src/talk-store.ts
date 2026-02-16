@@ -11,7 +11,19 @@ import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import * as readline from 'node:readline';
-import type { TalkMeta, TalkMessage, TalkJob, TalkAgent, TalkDirective, TalkPlatformBinding, JobReport, Logger } from './types.js';
+import type {
+  TalkMeta,
+  TalkMessage,
+  TalkJob,
+  TalkAgent,
+  TalkDirective,
+  TalkPlatformBinding,
+  JobReport,
+  Directive,
+  PlatformBinding,
+  PlatformPermission,
+  Logger,
+} from './types.js';
 
 const DEFAULT_DATA_DIR = path.join(
   process.env.HOME || '~',
@@ -29,6 +41,62 @@ const CONTEXT_CACHE_TTL_MS = 30_000;
 /** Validate that a talk ID is safe for use as a directory name. */
 function isValidId(id: string): boolean {
   return /^[\w-]+$/.test(id) && !id.includes('..');
+}
+
+function normalizePermission(raw: unknown): PlatformPermission {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (value === 'read' || value === 'write' || value === 'read+write') {
+    return value;
+  }
+  return 'read+write';
+}
+
+function normalizeDirectives(input: unknown): Directive[] {
+  if (!Array.isArray(input)) return [];
+  const now = Date.now();
+  return input
+    .filter((entry) => Boolean(entry && typeof entry === 'object'))
+    .map((entry) => {
+      const row = entry as Record<string, unknown>;
+      const text = typeof row.text === 'string' ? row.text.trim() : '';
+      if (!text) return null;
+      const id =
+        typeof row.id === 'string' && row.id.trim()
+          ? row.id.trim()
+          : randomUUID();
+      return {
+        id,
+        text,
+        active: row.active !== false,
+        createdAt: typeof row.createdAt === 'number' ? row.createdAt : now,
+      } satisfies Directive;
+    })
+    .filter((entry): entry is Directive => Boolean(entry));
+}
+
+function normalizePlatformBindings(input: unknown): PlatformBinding[] {
+  if (!Array.isArray(input)) return [];
+  const now = Date.now();
+  return input
+    .filter((entry) => Boolean(entry && typeof entry === 'object'))
+    .map((entry) => {
+      const row = entry as Record<string, unknown>;
+      const platform = typeof row.platform === 'string' ? row.platform.trim() : '';
+      const scope = typeof row.scope === 'string' ? row.scope.trim() : '';
+      if (!platform || !scope) return null;
+      const id =
+        typeof row.id === 'string' && row.id.trim()
+          ? row.id.trim()
+          : randomUUID();
+      return {
+        id,
+        platform,
+        scope,
+        permission: normalizePermission(row.permission),
+        createdAt: typeof row.createdAt === 'number' ? row.createdAt : now,
+      } satisfies PlatformBinding;
+    })
+    .filter((entry): entry is PlatformBinding => Boolean(entry));
 }
 
 export class TalkStore {
@@ -69,8 +137,11 @@ export class TalkStore {
           meta.pinnedMessageIds ??= [];
           meta.jobs ??= [];
           meta.agents ??= [];
-          meta.directives ??= [];
-          meta.platformBindings ??= [];
+          meta.directives = normalizeDirectives(meta.directives);
+          meta.platformBindings = normalizePlatformBindings(meta.platformBindings);
+          if (meta.processing === undefined) {
+            meta.processing = false;
+          }
           this.talks.set(meta.id, meta);
         } catch (err) {
           // File may not exist or be corrupted — skip it
@@ -103,6 +174,9 @@ export class TalkStore {
       pinnedMessageIds: [],
       jobs: [],
       processing: false,
+      directives: [],
+      platformBindings: [],
+      processing: false,
       createdAt: now,
       updatedAt: now,
     };
@@ -124,15 +198,22 @@ export class TalkStore {
     return sorted;
   }
 
-  updateTalk(id: string, updates: Partial<Pick<TalkMeta, 'topicTitle' | 'objective' | 'model' | 'directives' | 'platformBindings'>>): TalkMeta | null {
+  updateTalk(
+    id: string,
+    updates: Partial<
+      Pick<TalkMeta, 'topicTitle' | 'objective' | 'model' | 'directives' | 'platformBindings'>
+    >,
+  ): TalkMeta | null {
     const meta = this.talks.get(id);
     if (!meta) return null;
 
     if (updates.topicTitle !== undefined) meta.topicTitle = updates.topicTitle;
     if (updates.objective !== undefined) meta.objective = updates.objective;
     if (updates.model !== undefined) meta.model = updates.model;
-    if (updates.directives !== undefined) meta.directives = updates.directives;
-    if (updates.platformBindings !== undefined) meta.platformBindings = updates.platformBindings;
+    if (updates.directives !== undefined) meta.directives = normalizeDirectives(updates.directives);
+    if (updates.platformBindings !== undefined) {
+      meta.platformBindings = normalizePlatformBindings(updates.platformBindings);
+    }
     meta.updatedAt = Date.now();
 
     this.invalidateListCache();
@@ -376,7 +457,12 @@ export class TalkStore {
   // Job management
   // -------------------------------------------------------------------------
 
-  addJob(talkId: string, schedule: string, prompt: string, type?: 'once' | 'recurring' | 'event'): TalkJob | null {
+  addJob(
+    talkId: string,
+    schedule: string,
+    prompt: string,
+    type?: 'once' | 'recurring' | 'event',
+  ): TalkJob | null {
     const meta = this.talks.get(talkId);
     if (!meta) return null;
 
@@ -566,5 +652,9 @@ export class TalkStore {
     fsp.mkdir(dir, { recursive: true })
       .then(() => fsp.writeFile(path.join(dir, 'talk.json'), JSON.stringify(meta, null, 2)))
       .catch((err) => this.logger.warn(`TalkStore: persist failed for ${meta.id}: ${err}`));
+  }
+
+  getDataDir(): string {
+    return path.dirname(this.talksDir);
   }
 }
