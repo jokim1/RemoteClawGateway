@@ -135,6 +135,8 @@ export type MessageSendingHookEvent = {
   metadata?: Record<string, unknown>;
 };
 
+export type MessageReceivedHookResult = { cancel: true } | undefined;
+
 const seenEvents = new Map<string, SeenDecision>();
 const outboundSuppressions = new Map<string, OutboundSuppressionLease>();
 const queue: QueueItem[] = [];
@@ -162,6 +164,23 @@ function normalizeTarget(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const trimmed = value.trim();
   if (!trimmed) return undefined;
+  const slackScoped = trimmed.match(/^(?:slack:)?(channel|user):(.+)$/i);
+  if (slackScoped?.[1] && slackScoped?.[2]) {
+    const kind = slackScoped[1].toLowerCase();
+    const rawId = slackScoped[2].trim();
+    if (!rawId) return undefined;
+    return `${kind}:${rawId.toLowerCase()}`;
+  }
+
+  const directId = trimmed.match(/^(?:slack:)?([a-z0-9]+)$/i);
+  if (directId?.[1]) {
+    const id = directId[1];
+    if (/^u/i.test(id)) {
+      return `user:${id.toLowerCase()}`;
+    }
+    return `channel:${id.toLowerCase()}`;
+  }
+
   return trimmed.toLowerCase();
 }
 
@@ -1051,10 +1070,11 @@ export async function handleSlackMessageReceivedHook(
   event: MessageReceivedHookEvent,
   ctx: MessageHookContext,
   deps: SlackIngressDeps,
-): Promise<void> {
+): Promise<MessageReceivedHookResult> {
   const parsed = parseSlackMessageReceivedHookEvent(event, ctx);
-  if (!parsed) return;
-  routeSlackIngressEvent(parsed, deps);
+  if (!parsed) return undefined;
+  const decision = routeSlackIngressEvent(parsed, deps);
+  return decision.payload.decision === 'handled' ? { cancel: true } : undefined;
 }
 
 export function handleSlackMessageSendingHook(

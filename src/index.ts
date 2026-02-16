@@ -427,14 +427,15 @@ const plugin = {
     });
 
     // Listen for incoming platform messages (Slack, Telegram, etc.)
-    api.on('message_received', (event: any, ctx: any) => {
+    api.on('message_received', async (event: any, ctx: any) => {
       if (eventDispatcher) {
         eventDispatcher.handleMessageReceived(event, ctx).catch(err => {
           api.logger.warn(`ClawTalk: event dispatch error: ${err}`);
         });
       }
-      handleSlackMessageReceivedHook(event, ctx, buildSlackIngressDeps()).catch(err => {
+      return handleSlackMessageReceivedHook(event, ctx, buildSlackIngressDeps()).catch(err => {
         api.logger.warn(`ClawTalk: slack ownership hook failed: ${err}`);
+        return undefined;
       });
     });
 

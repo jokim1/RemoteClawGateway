@@ -70,7 +70,7 @@ describe('slack ingress ownership hooks', () => {
     addSlackBinding('channel:c123');
     process.env.CLAWTALK_INGRESS_SUPPRESS_MAX_CANCELS = '1';
 
-    await handleSlackMessageReceivedHook(
+    const hookResult = await handleSlackMessageReceivedHook(
       {
         from: 'slack:channel:C123',
         content: 'hello from slack',
@@ -86,6 +86,7 @@ describe('slack ingress ownership hooks', () => {
       },
       buildDeps(),
     );
+    expect(hookResult).toEqual({ cancel: true });
 
     const first = handleSlackMessageSendingHook(
       {
@@ -119,7 +120,7 @@ describe('slack ingress ownership hooks', () => {
   it('supports user-scoped bindings for Slack DM targets', async () => {
     addSlackBinding('user:u777');
 
-    await handleSlackMessageReceivedHook(
+    const hookResult = await handleSlackMessageReceivedHook(
       {
         from: 'slack:U777',
         content: 'dm message',
@@ -135,6 +136,7 @@ describe('slack ingress ownership hooks', () => {
       },
       buildDeps(),
     );
+    expect(hookResult).toEqual({ cancel: true });
 
     const result = handleSlackMessageSendingHook(
       {
@@ -151,8 +153,44 @@ describe('slack ingress ownership hooks', () => {
     expect(result).toEqual({ cancel: true });
   });
 
-  it('does not suppress outbound when no talk binding matches', async () => {
+  it('suppresses outbound across equivalent Slack target formats', async () => {
+    addSlackBinding('channel:c123');
+    process.env.CLAWTALK_INGRESS_SUPPRESS_MAX_CANCELS = '1';
+
     await handleSlackMessageReceivedHook(
+      {
+        from: 'slack:channel:C123',
+        content: 'hello from slack',
+        metadata: {
+          to: 'slack:channel:C123',
+          messageId: '1700000005.100',
+          senderId: 'U123',
+        },
+      },
+      {
+        channelId: 'slack',
+        accountId: 'acct-1',
+      },
+      buildDeps(),
+    );
+
+    const result = handleSlackMessageSendingHook(
+      {
+        to: 'channel:C123',
+        content: 'openclaw reply',
+        metadata: { accountId: 'acct-1' },
+      },
+      {
+        channelId: 'slack',
+        accountId: 'acct-1',
+      },
+      mockLogger,
+    );
+    expect(result).toEqual({ cancel: true });
+  });
+
+  it('does not suppress outbound when no talk binding matches', async () => {
+    const hookResult = await handleSlackMessageReceivedHook(
       {
         from: 'slack:channel:C404',
         content: 'no owner',
@@ -168,6 +206,7 @@ describe('slack ingress ownership hooks', () => {
       },
       buildDeps(),
     );
+    expect(hookResult).toBeUndefined();
 
     const result = handleSlackMessageSendingHook(
       {
@@ -196,7 +235,7 @@ describe('slack ingress ownership hooks', () => {
       }],
     });
 
-    await handleSlackMessageReceivedHook(
+    const hookResult = await handleSlackMessageReceivedHook(
       {
         from: 'slack:channel:C901',
         content: 'hello from slack',
@@ -212,6 +251,7 @@ describe('slack ingress ownership hooks', () => {
       },
       buildDeps(),
     );
+    expect(hookResult).toBeUndefined();
 
     const result = handleSlackMessageSendingHook(
       {
@@ -241,7 +281,7 @@ describe('slack ingress ownership hooks', () => {
     });
     process.env.CLAWTALK_INGRESS_SUPPRESS_MAX_CANCELS = '1';
 
-    await handleSlackMessageReceivedHook(
+    const hookResult = await handleSlackMessageReceivedHook(
       {
         from: 'slack:channel:C902',
         content: 'status?',
@@ -257,6 +297,7 @@ describe('slack ingress ownership hooks', () => {
       },
       buildDeps(),
     );
+    expect(hookResult).toEqual({ cancel: true });
 
     const first = handleSlackMessageSendingHook(
       {
@@ -276,7 +317,7 @@ describe('slack ingress ownership hooks', () => {
   it('ignores non-slack hook events', async () => {
     addSlackBinding('channel:c123');
 
-    await handleSlackMessageReceivedHook(
+    const hookResult = await handleSlackMessageReceivedHook(
       {
         from: 'telegram:group:1',
         content: 'hello telegram',
@@ -287,6 +328,7 @@ describe('slack ingress ownership hooks', () => {
       },
       buildDeps(),
     );
+    expect(hookResult).toBeUndefined();
 
     const result = handleSlackMessageSendingHook(
       {
