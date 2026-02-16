@@ -20,6 +20,46 @@ import { runToolLoop } from './tool-loop.js';
 
 /** Maximum number of history messages to include in LLM context. */
 const MAX_CONTEXT_MESSAGES = 50;
+/** Approximate max prompt payload budget before history gets trimmed more aggressively. */
+const MAX_CONTEXT_BUDGET_BYTES = 60 * 1024;
+/** Keep at least a short recent tail, even when over budget. */
+const MIN_HISTORY_MESSAGES = 8;
+/** Reserve bytes for model/tool metadata and the current user turn. */
+const RESERVED_OVERHEAD_BYTES = 8 * 1024;
+/** Never shrink history budget below this floor. */
+const MIN_HISTORY_BUDGET_BYTES = 4 * 1024;
+
+function estimateHistoryMessageBytes(msg: TalkMessage): number {
+  let size = Buffer.byteLength(msg.content || '', 'utf-8');
+  if (msg.agentName) size += Buffer.byteLength(msg.agentName, 'utf-8');
+  if (msg.tool_name) size += Buffer.byteLength(msg.tool_name, 'utf-8');
+  if (msg.tool_call_id) size += Buffer.byteLength(msg.tool_call_id, 'utf-8');
+  if (msg.tool_calls && msg.tool_calls.length > 0) {
+    size += Buffer.byteLength(JSON.stringify(msg.tool_calls), 'utf-8');
+  }
+  return size + 64;
+}
+
+function selectHistoryWithinBudget(
+  history: TalkMessage[],
+  budgetBytes: number,
+  minMessages = MIN_HISTORY_MESSAGES,
+): TalkMessage[] {
+  if (history.length <= minMessages) return history;
+  const selected: TalkMessage[] = [];
+  let used = 0;
+
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const msg = history[i];
+    const msgBytes = estimateHistoryMessageBytes(msg);
+    const mustKeep = selected.length < minMessages;
+    if (!mustKeep && used + msgBytes > budgetBytes) break;
+    selected.unshift(msg);
+    used += msgBytes;
+  }
+
+  return selected;
+}
 
 export interface TalkChatContext {
   req: IncomingMessage;
@@ -117,8 +157,15 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   } : undefined;
   const systemPrompt = composeSystemPrompt({ meta, contextMd, pinnedMessages, agentOverride, registry });
 
-  // Load recent history
-  const history = await store.getRecentMessages(talkId, MAX_CONTEXT_MESSAGES);
+  // Load recent history and adapt the included window to fit context budget.
+  const recentHistory = await store.getRecentMessages(talkId, MAX_CONTEXT_MESSAGES);
+  const systemPromptBytes = Buffer.byteLength(systemPrompt ?? '', 'utf-8');
+  const userTurnBytes = Buffer.byteLength(body.message, 'utf-8');
+  const historyBudgetBytes = Math.max(
+    MIN_HISTORY_BUDGET_BYTES,
+    MAX_CONTEXT_BUDGET_BYTES - systemPromptBytes - userTurnBytes - RESERVED_OVERHEAD_BYTES,
+  );
+  const history = selectHistoryWithinBudget(recentHistory, historyBudgetBytes);
 
   // Build message array for LLM, handling tool messages from history
   const messages: Array<any> = [];

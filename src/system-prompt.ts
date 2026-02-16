@@ -18,7 +18,7 @@ const MAX_TOOLS_IN_PROMPT = 20;
 const MAX_JOB_PROMPT_CHARS = 200;
 
 /** Maximum total prompt size in bytes. */
-const MAX_PROMPT_BYTES = 100 * 1024; // 100KB
+const MAX_PROMPT_BYTES = 48 * 1024;
 
 export interface SystemPromptInput {
   meta: TalkMeta;
@@ -31,6 +31,11 @@ export interface SystemPromptInput {
     otherAgents: { name: string; role: string; model: string }[];
   };
   registry?: ToolRegistry;
+}
+
+function totalPromptBytes(sections: string[]): number {
+  if (sections.length === 0) return 0;
+  return Buffer.byteLength(sections.join('\n\n'), 'utf-8');
 }
 
 export function composeSystemPrompt(input: SystemPromptInput): string | undefined {
@@ -87,7 +92,7 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
         'Your response is displayed in a terminal chat interface (ClawTalk). ' +
         'No tools are currently available. You can only output text.\n\n' +
         '- If asked to perform actions, explain that you have no tools and suggest alternatives.\n' +
-        '- You can schedule a ```job block for server-side follow-up work (see Talk Jobs section below).',
+        '- You can schedule a ```job block for server-side follow-up work (see Talk Automations section below).',
       );
     }
   } else {
@@ -100,7 +105,7 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
       '- If asked to create a document or report, write the full content directly in your response.\n' +
       '- If asked to do something that requires tools you don\'t have (file upload, web search, API calls, code execution), ' +
       'say so IMMEDIATELY. Do not pretend you can do it. Do not say "let me try" and then produce nothing.\n' +
-      '- You can schedule a ```job block for server-side follow-up work (see Talk Jobs section below).\n\n' +
+      '- You can schedule a ```job block for server-side follow-up work (see Talk Automations section below).\n\n' +
       '**CRITICAL: Never promise an action you cannot verify completing.** ' +
       'If you say "Let me create that file" or "I\'ll upload this now," you MUST actually produce output in this response. ' +
       'If you cannot, say so honestly on the first attempt — do not stall across multiple turns.',
@@ -133,33 +138,33 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
     'If you do not know how something works internally, say so rather than guessing.',
   );
 
-  // Objective
+  // Objectives
   if (meta.objective) {
     sections.push(
-      `## Objective\n${meta.objective}\n\n` +
+      `## Objectives\n${meta.objective}\n\n` +
       'Your responses should serve this objective. If the conversation drifts, gently ' +
       'steer it back. Track progress and flag when milestones are reached.',
     );
   }
 
-  // Directives
+  // Rules
   const activeDirectives = (meta.directives ?? []).filter(d => d.active);
   if (activeDirectives.length > 0) {
     const directiveLines = activeDirectives.map((d, i) => `${i + 1}. ${d.text}`);
     sections.push(
-      '## Directives\n' +
+      '## Rules\n' +
       'Follow each directive as written. These are standing rules for this conversation.\n\n' +
       directiveLines.join('\n'),
     );
   }
 
-  // Platform Access
+  // Channel Connections
   const bindings = meta.platformBindings ?? [];
   if (bindings.length > 0) {
     const bindingLines = bindings.map(b => `- **${b.platform}** ${b.scope} (${b.permission})`);
     sections.push(
-      '## Platform Access\n' +
-      'You have access to the following platforms. Use them as needed to fulfill directives and objectives.\n\n' +
+      '## Channel Connections\n' +
+      'You have access to the following platforms. Use them as needed to fulfill rules and objectives.\n\n' +
       bindingLines.join('\n'),
     );
   }
@@ -189,7 +194,7 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
     );
   }
 
-  // Active jobs (cap prompt display at MAX_JOB_PROMPT_CHARS each)
+  // Active automations (cap prompt display at MAX_JOB_PROMPT_CHARS each)
   const activeJobs = meta.jobs.filter(j => j.active);
   if (activeJobs.length > 0) {
     const scheduledJobs = activeJobs.filter(j => j.type !== 'event');
@@ -217,29 +222,29 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
     }
 
     sections.push(
-      `## Active Jobs\nBackground tasks monitoring this conversation:\n${lines.join('\n')}`,
+      `## Active Automations\nBackground tasks monitoring this conversation:\n${lines.join('\n')}`,
     );
   }
 
-  // Talk jobs explanation + creation instructions (always included)
+  // Talk automations explanation + creation instructions (always included)
   sections.push(
-    `## Talk Jobs\n` +
-    `This Talk has a **built-in job scheduler**. Jobs are recurring tasks that belong to ` +
-    `this Talk and run server-side on a schedule. Each job execution has full access to ` +
+    `## Talk Automations\n` +
+    `This Talk has a **built-in automation scheduler**. Automations are recurring tasks that belong to ` +
+    `this Talk and run server-side on a schedule. Each automation execution has full access to ` +
     `this Talk's context (objective, pinned messages, conversation summary). ` +
-    `Jobs produce reports that the user can review.\n\n` +
-    `**This is NOT the system cron.** Talk jobs are a feature of ClawTalk — they are ` +
+    `Automations produce reports that the user can review.\n\n` +
+    `**This is NOT the system cron.** Talk automations are a feature of ClawTalk — they are ` +
     `scoped to this Talk, managed via slash commands, and run automatically by the gateway.\n\n` +
-    `### Managing Jobs\n` +
-    `The user manages jobs with these slash commands:\n` +
-    '- `/job add "schedule" prompt` — create a new job\n' +
-    '- `/jobs` — list all jobs in this Talk\n' +
+    `### Managing Automations\n` +
+    `The user manages automations with these slash commands:\n` +
+    '- `/job add "schedule" prompt` — create a new automation\n' +
+    '- `/jobs` — list all automations in this Talk\n' +
     '- `/job pause N` — pause job #N\n' +
     '- `/job resume N` — resume job #N\n' +
     '- `/job delete N` — delete job #N\n' +
-    '- `/reports` — view job execution reports\n\n' +
-    `### Creating Jobs via Response\n` +
-    `You can also create a job by outputting a fenced job block in your response:\n\n` +
+    '- `/reports` — view automation execution reports\n\n' +
+    `### Creating Automations via Response\n` +
+    `You can also create an automation by outputting a fenced job block in your response:\n\n` +
     '```job\n' +
     `schedule: <cron or human-readable schedule>\n` +
     `prompt: <self-contained instruction for each run>\n` +
@@ -253,18 +258,38 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
     `Event-driven jobs fire whenever a message arrives from the specified platform scope. ` +
     `The scope must match an existing \`/platform\` binding. The message content and sender ` +
     `are injected into the job context automatically.\n\n` +
-    `One-off jobs run once at the specified time, then auto-deactivate. ` +
+    `One-off automations run once at the specified time, then auto-deactivate. ` +
     `When you promise to follow up later (e.g. "I'll research this and have it for you in an hour"), ` +
-    `create a one-off job to ensure you deliver.\n\n` +
+    `create a one-off automation to ensure you deliver.\n\n` +
     `The prompt must be self-contained — it runs independently with only the Talk context. ` +
-    `Create jobs when the user asks for something recurring, scheduled, or when you commit to a follow-up.\n\n` +
-    `### Moving External Tasks to Talk Jobs\n` +
+    `Create automations when the user asks for something recurring, scheduled, or when you commit to a follow-up.\n\n` +
+    `### Moving External Tasks to Talk Automations\n` +
     `If the user asks to move an external cron job, scheduled task, or recurring reminder ` +
-    `into this Talk, create a Talk job for it. Talk jobs are the preferred way to handle ` +
+    `into this Talk, create a Talk automation for it. Talk automations are the preferred way to handle ` +
     `recurring work within a Talk's scope.`,
   );
 
-  let result = sections.join('\n\n');
+  // Drop lower-priority optional sections first so Objectives/Rules remain intact.
+  const workingSections = [...sections];
+  const optionalDropOrder = [
+    '## Talk Automations',
+    '## Active Automations',
+    '## Pinned References',
+    '## Conversation Context',
+    '## Channel Connections',
+    '## Execution Environment',
+    '## Your Identity',
+  ];
+
+  for (const heading of optionalDropOrder) {
+    while (totalPromptBytes(workingSections) > MAX_PROMPT_BYTES) {
+      const idx = workingSections.findIndex(section => section.startsWith(heading));
+      if (idx === -1) break;
+      workingSections.splice(idx, 1);
+    }
+  }
+
+  let result = workingSections.join('\n\n');
 
   // Truncate at MAX_PROMPT_BYTES to prevent excessive prompt sizes
   if (Buffer.byteLength(result, 'utf-8') > MAX_PROMPT_BYTES) {

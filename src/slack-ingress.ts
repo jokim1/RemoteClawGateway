@@ -15,6 +15,10 @@ import { composeSystemPrompt } from './system-prompt.js';
 import { scheduleContextUpdate } from './context-updater.js';
 
 const MAX_CONTEXT_MESSAGES = 50;
+const MAX_CONTEXT_BUDGET_BYTES = 60 * 1024;
+const MIN_HISTORY_MESSAGES = 8;
+const RESERVED_OVERHEAD_BYTES = 8 * 1024;
+const MIN_HISTORY_BUDGET_BYTES = 4 * 1024;
 const LLM_TIMEOUT_MS = 120_000;
 const SEND_TIMEOUT_MS = 30_000;
 const EVENT_TTL_MS = 6 * 60 * 60_000;
@@ -148,6 +152,38 @@ function parseIntegerEnv(name: string, fallback: number, min = 0, max = Number.M
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(min, parsed));
+}
+
+function estimateHistoryMessageBytes(msg: TalkMessage): number {
+  let size = Buffer.byteLength(msg.content || '', 'utf-8');
+  if (msg.agentName) size += Buffer.byteLength(msg.agentName, 'utf-8');
+  if (msg.tool_name) size += Buffer.byteLength(msg.tool_name, 'utf-8');
+  if (msg.tool_call_id) size += Buffer.byteLength(msg.tool_call_id, 'utf-8');
+  if (msg.tool_calls && msg.tool_calls.length > 0) {
+    size += Buffer.byteLength(JSON.stringify(msg.tool_calls), 'utf-8');
+  }
+  return size + 64;
+}
+
+function selectHistoryWithinBudget(
+  history: TalkMessage[],
+  budgetBytes: number,
+  minMessages = MIN_HISTORY_MESSAGES,
+): TalkMessage[] {
+  if (history.length <= minMessages) return history;
+  const selected: TalkMessage[] = [];
+  let used = 0;
+
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const msg = history[i];
+    const msgBytes = estimateHistoryMessageBytes(msg);
+    const mustKeep = selected.length < minMessages;
+    if (!mustKeep && used + msgBytes > budgetBytes) break;
+    selected.unshift(msg);
+    used += msgBytes;
+  }
+
+  return selected;
 }
 
 function normalizeText(value: unknown): string | undefined {
@@ -446,12 +482,14 @@ function resolveAgentForEvent(meta: TalkMeta, preferredAgentName?: string): Talk
 }
 
 function resolveBehaviorForBinding(meta: TalkMeta, bindingId: string): {
+  autoRespond?: boolean;
   agentName?: string;
   onMessagePrompt?: string;
 } | undefined {
   const behavior = (meta.platformBehaviors ?? []).find((entry) => entry.platformBindingId === bindingId);
   if (!behavior) return undefined;
   return {
+    autoRespond: behavior.autoRespond,
     agentName: behavior.agentName?.trim() || undefined,
     onMessagePrompt: behavior.onMessagePrompt?.trim() || undefined,
   };
@@ -460,7 +498,7 @@ function resolveBehaviorForBinding(meta: TalkMeta, bindingId: string): {
 function shouldHandleViaBehavior(meta: TalkMeta, bindingId: string): {
   handle: boolean;
   reason?: string;
-  behavior?: { agentName?: string; onMessagePrompt?: string };
+  behavior?: { autoRespond?: boolean; agentName?: string; onMessagePrompt?: string };
 } {
   const behaviors = meta.platformBehaviors ?? [];
   // Backwards compatibility: if no behavior rows exist, keep legacy auto-reply behavior.
@@ -473,6 +511,10 @@ function shouldHandleViaBehavior(meta: TalkMeta, bindingId: string): {
     return { handle: false, reason: 'no-platform-behavior' };
   }
 
+  if (behavior.autoRespond === false) {
+    return { handle: false, reason: 'on-message-disabled' };
+  }
+
   if (!behavior.onMessagePrompt) {
     return { handle: false, reason: 'on-message-disabled' };
   }
@@ -481,7 +523,7 @@ function shouldHandleViaBehavior(meta: TalkMeta, bindingId: string): {
 }
 
 function buildRoleInstructions(agent: TalkAgent): string {
-  return `Act as the ${agent.role} for this Talk. Keep responses concise, actionable, and grounded in the Talk objective and directives.`;
+  return `Act as the ${agent.role} for this Talk. Keep responses concise, actionable, and grounded in the Talk objectives and rules.`;
 }
 
 function sanitizeSessionPart(value: string): string {
@@ -532,7 +574,7 @@ async function callLlmForEvent(params: {
   const model = selectedAgent?.model || meta.model || 'moltbot';
   const contextMd = await deps.store.getContextMd(talkId);
   const pinnedMessages = await Promise.all(meta.pinnedMessageIds.map(id => deps.store.getMessage(talkId, id)));
-  const history = await deps.store.getRecentMessages(talkId, MAX_CONTEXT_MESSAGES);
+  const recentHistory = await deps.store.getRecentMessages(talkId, MAX_CONTEXT_MESSAGES);
 
   const baseSystemPrompt = composeSystemPrompt({
     meta,
@@ -555,6 +597,12 @@ async function callLlmForEvent(params: {
     ? `${baseSystemPrompt}\n\n` +
       `Platform inbound behavior (Slack binding specific):\n${behaviorPrompt}`
     : baseSystemPrompt;
+  const systemPromptBytes = Buffer.byteLength(systemPrompt ?? '', 'utf-8');
+  const historyBudgetBytes = Math.max(
+    MIN_HISTORY_BUDGET_BYTES,
+    MAX_CONTEXT_BUDGET_BYTES - systemPromptBytes - RESERVED_OVERHEAD_BYTES,
+  );
+  const history = selectHistoryWithinBudget(recentHistory, historyBudgetBytes);
 
   const messages: Array<{ role: string; content: string }> = [];
   if (systemPrompt) {
