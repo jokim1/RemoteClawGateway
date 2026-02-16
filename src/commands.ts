@@ -13,7 +13,7 @@ export function registerCommands(api: PluginApi, talkStore: TalkStore): void {
   // /talks — list active talks
   api.registerCommand({
     name: 'talks',
-    description: 'List active ClawTalk conversations',
+    description: 'List active talks with IDs, model, and activity',
     usage: '/talks',
     handler: (ctx) => {
       const talks = talkStore.listTalks();
@@ -42,8 +42,8 @@ export function registerCommands(api: PluginApi, talkStore: TalkStore): void {
   // /talk-status <id> — show talk metadata
   api.registerCommand({
     name: 'talk-status',
-    description: 'Show metadata for a specific talk',
-    usage: '/talk-status <id>',
+    description: 'Show delivery health and metadata for one talk',
+    usage: '/talk-status <talk-id>  (example: /talk-status 6f7ac93e-78ac-45a9-8f78-c5976838edb7)',
     handler: async (ctx) => {
       const talkId = ctx.args[0];
       if (!talkId) {
@@ -78,6 +78,7 @@ export function registerCommands(api: PluginApi, talkStore: TalkStore): void {
         `Channel Delivery: inflight=${slackRuntime.inflight} delivered=${slackRuntime.counters.delivered} ` +
         `failed=${slackRuntime.counters.failed} retries=${slackRuntime.counters.retries}`,
       );
+      lines.push('Tip: if failed > 0, check gateway endpoint /api/events/slack/status?talkId=<talk-id>');
       if (recent) {
         lines.push(
           `Last Channel Event: ${recent.state} channel=${recent.channelId} attempt=${recent.attempt + 1}` +
@@ -92,7 +93,7 @@ export function registerCommands(api: PluginApi, talkStore: TalkStore): void {
   // /jobs — list all active automations across talks
   api.registerCommand({
     name: 'jobs',
-    description: 'List all active automations across all talks',
+    description: 'List active automations across all talks',
     usage: '/jobs',
     handler: (ctx) => {
       const activeJobs = talkStore.getAllActiveJobs();

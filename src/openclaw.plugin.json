@@ -105,27 +105,39 @@
   "uiHints": {
     "providers": {
       "label": "Provider Billing Config",
-      "help": "Per-provider billing mode. Keys are provider IDs (e.g. anthropic, deepseek)."
+      "help": "Per-provider billing mode. Keys are provider IDs (e.g. anthropic, deepseek). Example: {\"anthropic\":{\"billing\":\"api\"},\"openai\":{\"billing\":\"subscription\",\"plan\":\"pro\"}}"
     },
     "voice": {
       "label": "Voice Config",
-      "help": "STT/TTS configuration. Defaults to OpenAI Whisper + TTS if OPENAI_API_KEY is set."
+      "help": "STT/TTS configuration. Defaults to OpenAI Whisper + TTS if OPENAI_API_KEY is set. Example: {\"stt\":{\"provider\":\"openai\",\"model\":\"gpt-4o-mini-transcribe\"},\"tts\":{\"provider\":\"openai\",\"model\":\"gpt-4o-mini-tts\",\"defaultVoice\":\"alloy\"}}"
     },
     "pairPassword": {
       "label": "Pairing Password",
-      "help": "Password for mobile pairing. If unset, the /api/pair endpoint is disabled."
+      "help": "Password required by clients when pairing to this gateway. If unset, /api/pair is disabled. Example: \"my-shared-secret\""
     },
     "externalUrl": {
       "label": "External URL",
-      "help": "Preferred client URL (e.g. Tailscale Funnel URL). Returned during pairing."
+      "help": "Preferred client URL returned during pairing. Use this when clients should connect through a fixed URL. Example: \"https://my-gateway.example.com\""
     },
     "name": {
       "label": "Gateway Name",
-      "help": "Friendly name for this gateway, returned during pairing."
+      "help": "Friendly name shown to clients during pairing. Example: \"Family Gateway\""
     },
     "realtimeVoice": {
       "label": "Realtime Voice Config",
-      "help": "Default provider and per-provider model/voice settings for real-time voice streaming."
+      "help": "Default provider and per-provider model/voice settings for real-time streaming. Example: {\"defaultProvider\":\"openai\",\"openai\":{\"model\":\"gpt-4o-realtime-preview\",\"voice\":\"alloy\"}}"
+    },
+    "dataDir": {
+      "label": "Data Directory",
+      "help": "Where talks, context, and reports are stored. Default: ~/.openclaw/plugins/clawtalk"
+    },
+    "llmCallTimeoutMs": {
+      "label": "Chat Timeout (ms)",
+      "help": "Streaming chat timeout in milliseconds. Increase if large prompts/tools run long. Example: 300000 (5 min)"
+    },
+    "jobTimeoutMs": {
+      "label": "Automation Timeout (ms)",
+      "help": "Automation/job timeout in milliseconds. Example: 120000 (2 min). Increase for heavier scheduled tasks."
     }
   }
 }
