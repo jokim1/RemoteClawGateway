@@ -150,6 +150,12 @@ function sanitizeSessionPart(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_').slice(0, 96);
 }
 
+function firstHeaderValue(value: string | string[] | undefined): string | undefined {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value) && value.length > 0) return value[0];
+  return undefined;
+}
+
 function resolveTalkAgentRouting(meta: { agents?: Array<{ name: string; openClawAgentId?: string }> }, requestedAgentName?: string): {
   headerAgentId?: string;
   sessionAgentPart: string;
@@ -540,6 +546,8 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   let responseModel: string | undefined;
   let toolCallMessages: Array<any> = [];
   const routing = resolveTalkAgentRouting(meta, body.agentName);
+  const inboundAgentHeaderRaw = firstHeaderValue(req.headers['x-openclaw-agent-id']);
+  const inboundAgentId = inboundAgentHeaderRaw?.trim() || undefined;
   const traceId = randomUUID();
   const routeDiag = await collectRoutingDiagnostics({
     requestedModel: model,
@@ -555,9 +563,7 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   // Use a separate lane suffix for per-run isolation.
   const resolvedSessionAgentId =
     resolvedHeaderAgentId?.trim()
-    || routeDiag.matchedRequestedModelAgentId?.trim()
-    || routeDiag.configuredAgentId?.trim()
-    || routeDiag.defaultAgentId?.trim()
+    || inboundAgentId
     || CLAWTALK_DEFAULT_AGENT_ID;
   const sessionRoutePart = resolvedSessionAgentId;
   const runScopedSessionPart = buildRunScopedSessionPart(
@@ -575,6 +581,7 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   logger.info(
     `ModelRoute trace=${traceId} flow=talk-chat talkId=${talkId} requestedModel=${routeDiag.requestedModel} `
     + `sessionRoutePart=${sessionRoutePart} runScopedSessionPart=${runScopedSessionPart} sessionKey=${extraHeaders['x-openclaw-session-key']} `
+    + `inboundAgentId=${inboundAgentId ?? '-'} `
     + `headerAgentId=${routing.headerAgentId ?? '-'} effectiveHeaderAgentId=${resolvedHeaderAgentId ?? '-'} `
     + `configuredAgentId=${routeDiag.configuredAgentId ?? '-'} `
     + `configuredAgentModel=${routeDiag.configuredAgentModel ?? '-'} defaultAgentId=${routeDiag.defaultAgentId ?? '-'} `
@@ -583,7 +590,7 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   );
 
   if (isModelQuestion) {
-    const effectiveAgentId = resolvedHeaderAgentId ?? routeDiag.configuredAgentId ?? '-';
+    const effectiveAgentId = resolvedHeaderAgentId ?? resolvedSessionAgentId ?? '-';
     const effectiveAgentModel = routeDiag.matchedRequestedModelAgentModel
       ?? routeDiag.configuredAgentModel
       ?? routeDiag.defaultAgentModel
