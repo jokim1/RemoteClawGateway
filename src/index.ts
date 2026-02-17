@@ -772,7 +772,7 @@ const plugin = {
             return true;
           }
           // All other /api/talks/* CRUD routes
-          await handleTalks(ctx, talkStore);
+          await handleTalks(ctx, talkStore, toolRegistry);
           return true;
         }
 

@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { TalkStore } from './talk-store.js';
 import type { TalkMessage, ImageAttachmentMeta, Logger } from './types.js';
-import type { ToolRegistry } from './tool-registry.js';
+import type { ToolInfo, ToolRegistry } from './tool-registry.js';
 import type { ToolExecutor } from './tool-executor.js';
 import { sendJson, readJsonBody } from './http.js';
 import { composeSystemPrompt } from './system-prompt.js';
@@ -64,6 +64,31 @@ function isLikelyActionRequest(message: string): boolean {
     || /^\/\w+/.test(text)
     || /```/.test(text)
   );
+}
+
+function hasExplicitToolApproval(message: string): boolean {
+  const text = message.trim().toLowerCase();
+  if (!text) return false;
+  return (
+    /\b(use|run|execute)\s+(the\s+)?tools?\b/.test(text)
+    || /\btools?\s+(ok|okay|approved?|allowed?)\b/.test(text)
+    || /^\/tools\b/.test(text)
+  );
+}
+
+function filterToolInfos(
+  tools: ToolInfo[],
+  allow: string[] | undefined,
+  deny: string[] | undefined,
+): ToolInfo[] {
+  const allowSet = new Set((allow ?? []).map((n) => n.toLowerCase()));
+  const denySet = new Set((deny ?? []).map((n) => n.toLowerCase()));
+  return tools.filter((tool) => {
+    const key = tool.name.toLowerCase();
+    if (denySet.has(key)) return false;
+    if (allowSet.size > 0 && !allowSet.has(key)) return false;
+    return true;
+  });
 }
 
 function sanitizeSessionPart(value: string): string {
@@ -209,9 +234,23 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
 
   // Per-turn tool policy:
   // - Model identity/meta questions use deterministic server-side answer.
-  // - Other turns get tools only when the user likely requested actions.
+  // - Talk-level toolMode controls when tools are enabled.
+  // - allow/deny lists constrain which tools can run.
   const isModelQuestion = isModelIdentityQuestion(body.message);
-  const enableToolsForTurn = !isModelQuestion && isLikelyActionRequest(body.message);
+  const talkToolMode = meta.toolMode ?? 'auto';
+  const likelyActionRequest = isLikelyActionRequest(body.message);
+  const explicitToolApproval = hasExplicitToolApproval(body.message);
+  const enableToolsForTurn = !isModelQuestion
+    && talkToolMode !== 'off'
+    && (
+      (talkToolMode === 'auto' && likelyActionRequest)
+      || (talkToolMode === 'confirm' && explicitToolApproval)
+    );
+  const availableToolInfos = filterToolInfos(
+    registry.listTools(),
+    meta.toolsAllow,
+    meta.toolsDeny,
+  );
 
   // Load context and pinned messages
   const contextMd = await store.getContextMd(talkId);
@@ -234,6 +273,8 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     pinnedMessages,
     activeModel: model,
     agentOverride,
+    toolManifest: availableToolInfos,
+    toolMode: talkToolMode,
     registry: enableToolsForTurn ? registry : undefined,
   });
 
@@ -349,11 +390,20 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   res.write(`event: meta\ndata: ${JSON.stringify({ userMessageId: userMsg.id })}\n\n`);
 
   // Tool policy derived above and mirrored in prompt composition.
-  const disableTools = !enableToolsForTurn;
-  const tools = disableTools ? [] : registry.getToolSchemas();
+  const disableTools = !enableToolsForTurn || availableToolInfos.length === 0;
+  const enabledToolNames = new Set(availableToolInfos.map((tool) => tool.name.toLowerCase()));
+  const tools = disableTools
+    ? []
+    : registry.getToolSchemas().filter((tool) => enabledToolNames.has(tool.function.name.toLowerCase()));
   const maxIterations = disableTools ? 2 : undefined;
   if (disableTools) {
-    const reason = isModelQuestion ? 'model-meta' : 'non-action-turn';
+    const reason = isModelQuestion
+      ? 'model-meta'
+      : talkToolMode === 'off'
+        ? 'tool-mode-off'
+        : talkToolMode === 'confirm' && !explicitToolApproval
+          ? 'tool-confirm-awaiting-approval'
+          : 'non-action-turn';
     logger.info(`TalkChat: tool bypass (${reason}) talkId=${talkId}`);
   }
 

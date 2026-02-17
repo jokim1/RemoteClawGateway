@@ -6,7 +6,7 @@
  */
 
 import type { TalkMeta, TalkMessage, TalkJob } from './types.js';
-import type { ToolRegistry } from './tool-registry.js';
+import type { ToolInfo, ToolRegistry } from './tool-registry.js';
 
 /** Maximum pinned messages included in the prompt. */
 const MAX_PINNED_IN_PROMPT = 10;
@@ -32,6 +32,8 @@ export interface SystemPromptInput {
     otherAgents: { name: string; role: string; model: string }[];
   };
   registry?: ToolRegistry;
+  toolManifest?: ToolInfo[];
+  toolMode?: 'off' | 'confirm' | 'auto';
 }
 
 function totalPromptBytes(sections: string[]): number {
@@ -40,7 +42,7 @@ function totalPromptBytes(sections: string[]): number {
 }
 
 export function composeSystemPrompt(input: SystemPromptInput): string | undefined {
-  const { meta, contextMd, pinnedMessages, activeModel, agentOverride, registry } = input;
+  const { meta, contextMd, pinnedMessages, activeModel, agentOverride, registry, toolManifest, toolMode } = input;
 
   // Priority-ordered sections: identity > objective > context > pinned > jobs > tools
   // Each section is built and then assembled, truncating lower-priority sections if needed.
@@ -62,7 +64,7 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
 
   // Execution environment — tool-aware capability awareness
   if (registry) {
-    const tools = registry.listTools();
+    const tools = toolManifest ?? registry.listTools();
     if (tools.length > 0) {
       // Cap tool listing at MAX_TOOLS_IN_PROMPT
       const displayTools = tools.slice(0, MAX_TOOLS_IN_PROMPT);
@@ -73,7 +75,8 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
       sections.push(
         '## Execution Environment\n' +
         'Your response is displayed in a terminal chat interface (ClawTalk). ' +
-        'You have **tools available** via function calling.\n\n' +
+        'You have **tools available** via function calling for this turn.\n\n' +
+        `Tool execution mode for this Talk: **${toolMode ?? 'auto'}**.\n\n` +
         '### Available Tools\n' +
         toolLines.join('\n') + overflow + '\n\n' +
         '### Tool Usage Guidelines\n' +
@@ -98,10 +101,21 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
       );
     }
   } else {
+    const manifest = (toolManifest ?? []).slice(0, MAX_TOOLS_IN_PROMPT);
+    const manifestLines = manifest.map(t => `- **${t.name}**: ${t.description.slice(0, 120)}`);
+    const manifestOverflow = (toolManifest?.length ?? 0) > MAX_TOOLS_IN_PROMPT
+      ? `\n- ... and ${(toolManifest?.length ?? 0) - MAX_TOOLS_IN_PROMPT} more tools`
+      : '';
     sections.push(
       '## Execution Environment\n' +
       'Your response is displayed in a terminal chat interface (ClawTalk). ' +
-      'Check whether you have been given tools or function-calling in this conversation.\n\n' +
+      'Tool execution is currently disabled for this turn.\n\n' +
+      `Tool execution mode for this Talk: **${toolMode ?? 'auto'}**.\n\n` +
+      (
+        manifest.length > 0
+          ? '### Installed Tools (for awareness)\n' + manifestLines.join('\n') + manifestOverflow + '\n\n'
+          : ''
+      ) +
       '**If you have tools available:** Use them. If a tool call fails, tell the user what happened and suggest alternatives.\n\n' +
       '**If you do NOT have tools available:** You can only output text in this response. Be upfront about this:\n' +
       '- If asked to create a document or report, write the full content directly in your response.\n' +
@@ -126,14 +140,15 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
     'Only save to broader/external context if the user explicitly asks for it.\n\n' +
     '## Formatting\n' +
     'This conversation is displayed in a terminal. ' +
-    'NEVER use markdown tables (pipes/dashes) or HTML tables — they render poorly in terminals. ' +
-    'When presenting tabular data, use a fenced code block with manually aligned columns, or ' +
+    'NEVER use markdown tables (pipes/dashes), HTML tables, or box-drawing Unicode table characters. ' +
+    'When presenting tabular data, use a fenced code block with manually aligned plain-text columns, or ' +
     'use plain spaced columns without pipes. For example:\n' +
     '```\n' +
     'Name            Score   Result\n' +
     'Alice             95   Passed\n' +
     'Bob               82   Passed\n' +
-    '```\n\n' +
+    '```\n' +
+    'If you drafted a markdown or HTML table, rewrite it into the format above before sending.\n\n' +
     '## Honesty\n' +
     'Do not speculate about or fabricate system internals, configuration entries, ' +
     'session identifiers, or infrastructure details you do not actually have access to. ' +
@@ -245,15 +260,9 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
     `this Talk's context (objective, pinned messages, conversation summary). ` +
     `Automations produce reports that the user can review.\n\n` +
     `**This is NOT the system cron.** Talk automations are a feature of ClawTalk — they are ` +
-    `scoped to this Talk, managed via slash commands, and run automatically by the gateway.\n\n` +
+    `scoped to this Talk, managed in the Talk interface, and run automatically by the gateway.\n\n` +
     `### Managing Automations\n` +
-    `The user manages automations with these slash commands:\n` +
-    '- `/job add "schedule" prompt` — create a new automation\n' +
-    '- `/jobs` — list all automations in this Talk\n' +
-    '- `/job pause N` — pause job #N\n' +
-    '- `/job resume N` — resume job #N\n' +
-    '- `/job delete N` — delete job #N\n' +
-    '- `/reports` — view automation execution reports\n\n' +
+    `The user can create, pause, resume, and remove automations from the Talk controls.\n\n` +
     `### Creating Automations via Response\n` +
     `You can also create an automation by outputting a fenced job block in your response:\n\n` +
     '```job\n' +
@@ -267,7 +276,7 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
     '- Daily: `daily 8am`, `daily 14:00` (recurring)\n' +
     '- Cron: `0 8 * * *` (daily 8 AM), `0 9 * * 1` (Monday 9 AM), `30 17 * * 1-5` (weekdays 5:30 PM)\n\n' +
     `Event-driven jobs fire whenever a message arrives from the specified platform scope. ` +
-    `The scope must match an existing \`/platform\` binding. The message content and sender ` +
+    `The scope must match an existing Channel Connection. The message content and sender ` +
     `are injected into the job context automatically.\n\n` +
     `One-off automations run once at the specified time, then auto-deactivate. ` +
     `When you promise to follow up later (e.g. "I'll research this and have it for you in an hour"), ` +

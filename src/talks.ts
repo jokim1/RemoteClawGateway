@@ -86,6 +86,29 @@ function normalizeObjectiveAlias(raw: unknown): string | undefined {
   return undefined;
 }
 
+function normalizeToolModeInput(raw: unknown): 'off' | 'confirm' | 'auto' | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const value = raw.trim().toLowerCase();
+  if (value === 'off' || value === 'confirm' || value === 'auto') return value;
+  return undefined;
+}
+
+function normalizeToolNameListInput(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue;
+    const name = entry.trim();
+    if (!name || !/^[a-zA-Z0-9_.-]+$/.test(name)) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+  return out;
+}
+
 function mapChannelResponseSettingsInput(input: unknown): unknown {
   if (!Array.isArray(input)) return input;
   return input.map((entry) => {
@@ -742,7 +765,7 @@ export function findSlackBindingConflicts(params: {
  * Route a /api/talks request to the appropriate handler.
  * Returns true if the request was handled.
  */
-export async function handleTalks(ctx: HandlerContext, store: TalkStore): Promise<void> {
+export async function handleTalks(ctx: HandlerContext, store: TalkStore, registry?: ToolRegistry): Promise<void> {
   const { req, res, url } = ctx;
   const pathname = url.pathname;
 
@@ -775,6 +798,16 @@ export async function handleTalks(ctx: HandlerContext, store: TalkStore): Promis
       return;
     }
     return handleGetMessages(ctx, store, messagesMatch[1]);
+  }
+
+  // GET/PATCH /api/talks/:id/tools
+  const toolsMatch = pathname.match(/^\/api\/talks\/([\w-]+)\/tools$/);
+  if (toolsMatch) {
+    const talkId = toolsMatch[1];
+    if (req.method === 'GET') return handleGetTalkTools(ctx, store, talkId, registry);
+    if (req.method === 'PATCH') return handleUpdateTalkTools(ctx, store, talkId, registry);
+    sendJson(res, 405, { error: 'Method not allowed' });
+    return;
   }
 
   // POST/DELETE /api/talks/:id/pin/:msgId
@@ -862,6 +895,14 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
     channelConnections?: any[];
     platformBehaviors?: any[];
     channelResponseSettings?: any[];
+    toolMode?: string;
+    toolsAllow?: string[];
+    toolsDeny?: string[];
+    toolPolicy?: {
+      mode?: string;
+      allow?: string[];
+      deny?: string[];
+    };
   } = {};
   try {
     body = (await readJsonBody(ctx.req)) as typeof body;
@@ -881,6 +922,23 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
   if (body.platformBehaviors === undefined && body.channelResponseSettings !== undefined) {
     body.platformBehaviors = mapChannelResponseSettingsInput(body.channelResponseSettings) as any[];
   }
+  if (body.toolMode === undefined && body.toolPolicy?.mode !== undefined) {
+    body.toolMode = body.toolPolicy.mode;
+  }
+  if (body.toolsAllow === undefined && body.toolPolicy?.allow !== undefined) {
+    body.toolsAllow = body.toolPolicy.allow;
+  }
+  if (body.toolsDeny === undefined && body.toolPolicy?.deny !== undefined) {
+    body.toolsDeny = body.toolPolicy.deny;
+  }
+
+  const toolMode = normalizeToolModeInput(body.toolMode);
+  if (body.toolMode !== undefined && toolMode === undefined) {
+    sendJson(ctx.res, 400, { error: 'toolMode must be one of: off, confirm, auto' });
+    return;
+  }
+  const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
+  const toolsDeny = normalizeToolNameListInput(body.toolsDeny);
 
   if (body.platformBindings !== undefined) {
     const parsed = await normalizeAndValidatePlatformBindingsInput(body.platformBindings, {
@@ -925,6 +983,9 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
     ...(body.directives !== undefined ? { directives: body.directives } : {}),
     ...(body.platformBindings !== undefined ? { platformBindings: body.platformBindings } : {}),
     ...(body.platformBehaviors !== undefined ? { platformBehaviors: body.platformBehaviors } : {}),
+    ...(toolMode !== undefined ? { toolMode } : {}),
+    ...(toolsAllow !== undefined ? { toolsAllow } : {}),
+    ...(toolsDeny !== undefined ? { toolsDeny } : {}),
   });
 
   void reconcileSlackRoutingForTalks(store.listTalks(), ctx.logger);
@@ -947,6 +1008,98 @@ async function handleGetTalk(ctx: HandlerContext, store: TalkStore, talkId: stri
   sendJson(ctx.res, 200, { ...talk, contextMd });
 }
 
+function selectTalkTools(
+  allTools: Array<{ name: string; description: string; builtin: boolean }>,
+  allow: string[] | undefined,
+  deny: string[] | undefined,
+): Array<{ name: string; description: string; builtin: boolean }> {
+  const allowSet = new Set((allow ?? []).map((n) => n.toLowerCase()));
+  const denySet = new Set((deny ?? []).map((n) => n.toLowerCase()));
+  return allTools.filter((tool) => {
+    const key = tool.name.toLowerCase();
+    if (denySet.has(key)) return false;
+    if (allowSet.size > 0 && !allowSet.has(key)) return false;
+    return true;
+  });
+}
+
+async function handleGetTalkTools(
+  ctx: HandlerContext,
+  store: TalkStore,
+  talkId: string,
+  registry?: ToolRegistry,
+): Promise<void> {
+  const talk = store.getTalk(talkId);
+  if (!talk) {
+    sendJson(ctx.res, 404, { error: 'Talk not found' });
+    return;
+  }
+  const allTools = registry?.listTools() ?? [];
+  const enabledTools = selectTalkTools(allTools, talk.toolsAllow, talk.toolsDeny);
+  sendJson(ctx.res, 200, {
+    talkId,
+    toolMode: talk.toolMode ?? 'auto',
+    toolsAllow: talk.toolsAllow ?? [],
+    toolsDeny: talk.toolsDeny ?? [],
+    availableTools: allTools,
+    enabledTools,
+  });
+}
+
+async function handleUpdateTalkTools(
+  ctx: HandlerContext,
+  store: TalkStore,
+  talkId: string,
+  registry?: ToolRegistry,
+): Promise<void> {
+  let body: {
+    toolMode?: string;
+    toolsAllow?: string[];
+    toolsDeny?: string[];
+  };
+  try {
+    body = (await readJsonBody(ctx.req)) as typeof body;
+  } catch {
+    sendJson(ctx.res, 400, { error: 'Invalid JSON body' });
+    return;
+  }
+
+  const talk = store.getTalk(talkId);
+  if (!talk) {
+    sendJson(ctx.res, 404, { error: 'Talk not found' });
+    return;
+  }
+
+  const toolMode = normalizeToolModeInput(body.toolMode);
+  if (body.toolMode !== undefined && toolMode === undefined) {
+    sendJson(ctx.res, 400, { error: 'toolMode must be one of: off, confirm, auto' });
+    return;
+  }
+  const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
+  const toolsDeny = normalizeToolNameListInput(body.toolsDeny);
+
+  const updated = store.updateTalk(talkId, {
+    ...(toolMode !== undefined ? { toolMode } : {}),
+    ...(toolsAllow !== undefined ? { toolsAllow } : {}),
+    ...(toolsDeny !== undefined ? { toolsDeny } : {}),
+  });
+  if (!updated) {
+    sendJson(ctx.res, 404, { error: 'Talk not found' });
+    return;
+  }
+
+  const allTools = registry?.listTools() ?? [];
+  const enabledTools = selectTalkTools(allTools, updated.toolsAllow, updated.toolsDeny);
+  sendJson(ctx.res, 200, {
+    talkId,
+    toolMode: updated.toolMode ?? 'auto',
+    toolsAllow: updated.toolsAllow ?? [],
+    toolsDeny: updated.toolsDeny ?? [],
+    availableTools: allTools,
+    enabledTools,
+  });
+}
+
 async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: string): Promise<void> {
   let body: {
     topicTitle?: string;
@@ -960,6 +1113,14 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
     channelConnections?: any[];
     platformBehaviors?: any[];
     channelResponseSettings?: any[];
+    toolMode?: string;
+    toolsAllow?: string[];
+    toolsDeny?: string[];
+    toolPolicy?: {
+      mode?: string;
+      allow?: string[];
+      deny?: string[];
+    };
   };
   try {
     body = (await readJsonBody(ctx.req)) as typeof body;
@@ -986,6 +1147,23 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
   if (body.platformBehaviors === undefined && body.channelResponseSettings !== undefined) {
     body.platformBehaviors = mapChannelResponseSettingsInput(body.channelResponseSettings) as any[];
   }
+  if (body.toolMode === undefined && body.toolPolicy?.mode !== undefined) {
+    body.toolMode = body.toolPolicy.mode;
+  }
+  if (body.toolsAllow === undefined && body.toolPolicy?.allow !== undefined) {
+    body.toolsAllow = body.toolPolicy.allow;
+  }
+  if (body.toolsDeny === undefined && body.toolPolicy?.deny !== undefined) {
+    body.toolsDeny = body.toolPolicy.deny;
+  }
+
+  const toolMode = normalizeToolModeInput(body.toolMode);
+  if (body.toolMode !== undefined && toolMode === undefined) {
+    sendJson(ctx.res, 400, { error: 'toolMode must be one of: off, confirm, auto' });
+    return;
+  }
+  const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
+  const toolsDeny = normalizeToolNameListInput(body.toolsDeny);
 
   if (body.platformBindings !== undefined) {
     const parsed = await normalizeAndValidatePlatformBindingsInput(body.platformBindings, {
@@ -1046,6 +1224,9 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
     directives: body.directives,
     platformBindings: body.platformBindings,
     platformBehaviors: body.platformBehaviors,
+    toolMode,
+    toolsAllow,
+    toolsDeny,
   });
   if (!updated) {
     sendJson(ctx.res, 404, { error: 'Talk not found' });

@@ -53,6 +53,29 @@ function normalizePermission(raw: unknown): PlatformPermission {
   return 'read+write';
 }
 
+function normalizeToolMode(raw: unknown): 'off' | 'confirm' | 'auto' {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (value === 'off' || value === 'confirm' || value === 'auto') return value;
+  return 'auto';
+}
+
+function normalizeToolNames(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of input) {
+    if (typeof entry !== 'string') continue;
+    const name = entry.trim();
+    if (!name) continue;
+    if (!/^[a-zA-Z0-9_.-]+$/.test(name)) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+  return out;
+}
+
 function normalizeDirectives(input: unknown): Directive[] {
   if (!Array.isArray(input)) return [];
   const now = Date.now();
@@ -187,6 +210,9 @@ export class TalkStore {
           meta.directives = normalizeDirectives(meta.directives);
           meta.platformBindings = normalizePlatformBindings(meta.platformBindings);
           meta.platformBehaviors = normalizePlatformBehaviors(meta.platformBehaviors, meta.platformBindings);
+          meta.toolMode = normalizeToolMode(meta.toolMode);
+          meta.toolsAllow = normalizeToolNames(meta.toolsAllow);
+          meta.toolsDeny = normalizeToolNames(meta.toolsDeny);
           if (meta.processing === undefined) {
             meta.processing = false;
           }
@@ -225,6 +251,9 @@ export class TalkStore {
       directives: [],
       platformBindings: [],
       platformBehaviors: [],
+      toolMode: 'auto',
+      toolsAllow: [],
+      toolsDeny: [],
       createdAt: now,
       updatedAt: now,
     };
@@ -251,7 +280,7 @@ export class TalkStore {
     updates: Partial<
       Pick<
         TalkMeta,
-        'topicTitle' | 'objective' | 'model' | 'directives' | 'platformBindings' | 'platformBehaviors'
+        'topicTitle' | 'objective' | 'model' | 'directives' | 'platformBindings' | 'platformBehaviors' | 'toolMode' | 'toolsAllow' | 'toolsDeny'
       >
     >,
   ): TalkMeta | null {
@@ -271,6 +300,15 @@ export class TalkStore {
         updates.platformBehaviors,
         meta.platformBindings,
       );
+    }
+    if (updates.toolMode !== undefined) {
+      meta.toolMode = normalizeToolMode(updates.toolMode);
+    }
+    if (updates.toolsAllow !== undefined) {
+      meta.toolsAllow = normalizeToolNames(updates.toolsAllow);
+    }
+    if (updates.toolsDeny !== undefined) {
+      meta.toolsDeny = normalizeToolNames(updates.toolsDeny);
     }
     meta.updatedAt = Date.now();
 

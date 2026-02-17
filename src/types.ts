@@ -250,6 +250,12 @@ export interface TalkMeta {
   topicTitle?: string;
   objective?: string;
   model?: string;
+  /** Tool execution mode for this talk. */
+  toolMode?: 'off' | 'confirm' | 'auto';
+  /** Optional allow-list of tool names for this talk (empty = all). */
+  toolsAllow?: string[];
+  /** Optional deny-list of tool names for this talk. */
+  toolsDeny?: string[];
   pinnedMessageIds: string[];
   jobs: TalkJob[];
   agents?: TalkAgent[];
