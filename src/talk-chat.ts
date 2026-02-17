@@ -137,7 +137,7 @@ function resolveTalkAgentRouting(meta: { agents?: Array<{ name: string; openClaw
 function buildTalkSessionKey(talkId: string, agentPart: string): string {
   const talk = sanitizeSessionPart(talkId) || 'talk';
   const agent = sanitizeSessionPart(agentPart) || CLAWTALK_DEFAULT_AGENT_ID;
-  return `agent_${agent}_clawtalk_talk_${talk}_chat`;
+  return `agent:${agent}:clawtalk:talk:${talk}:chat`;
 }
 
 function buildRunScopedSessionPart(basePart: string, model: string, traceId: string): string {

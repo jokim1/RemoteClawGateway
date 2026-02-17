@@ -691,7 +691,7 @@ function buildSlackSessionKey(params: {
   const threadId = sanitizeSessionPart(
     params.event.threadTs ?? params.event.messageTs ?? params.event.eventId,
   ) || 'event';
-  return `agent_${agentId}_clawtalk_talk_${talkId}_slack_channel_${channelId}_thread_${threadId}`;
+  return `agent:${agentId}:clawtalk:talk:${talkId}:slack:channel:${channelId}:thread:${threadId}`;
 }
 
 function buildInboundMessage(event: SlackIngressEvent): string {
