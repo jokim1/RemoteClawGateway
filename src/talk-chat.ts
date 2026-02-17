@@ -106,6 +106,15 @@ function isGoogleDriveIntent(message: string): boolean {
   );
 }
 
+function extractDriveListLimit(message: string): number {
+  const text = message.trim().toLowerCase();
+  const explicit = text.match(/\b(\d{1,3})\s+(?:most\s+)?recent\b/);
+  const generic = text.match(/\b(?:limit|top)\s+(\d{1,3})\b/);
+  const value = Number.parseInt((explicit?.[1] ?? generic?.[1] ?? '10'), 10);
+  if (!Number.isFinite(value)) return 10;
+  return Math.min(100, Math.max(1, value));
+}
+
 function prioritizeTurnToolInfos(tools: ToolInfo[], message: string): ToolInfo[] {
   if (!isGoogleDriveIntent(message)) return tools;
   const hasDriveTool = tools.some((tool) => tool.name.trim().toLowerCase() === 'google_drive_files');
@@ -309,6 +318,66 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     meta.toolsAllow,
     meta.toolsDeny,
   ), body.message);
+  const hasGoogleDriveTool = availableToolInfos.some(
+    (tool) => tool.name.trim().toLowerCase() === 'google_drive_files',
+  );
+
+  // Deterministic Drive listing fast path:
+  // bypass model/tool-chaining for common "recent drive files" requests.
+  if (!isModelQuestion && isGoogleDriveIntent(body.message) && hasGoogleDriveTool) {
+    const driveLimit = extractDriveListLimit(body.message);
+    const userMessageId = randomUUID();
+    const driveResult = await executor.execute('google_drive_files', JSON.stringify({
+      action: 'list',
+      page_size: driveLimit,
+    }));
+    const directReply = driveResult.success
+      ? driveResult.content
+      : `Google Drive request failed: ${driveResult.content}`;
+
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.write(`event: meta\ndata: ${JSON.stringify({ userMessageId })}\n\n`);
+    res.write(`data: ${JSON.stringify({
+      choices: [{ delta: { content: directReply } }],
+      model,
+    })}\n\n`);
+    await store.appendMessage(talkId, {
+      id: userMessageId,
+      role: 'user',
+      content: body.message,
+      timestamp: Date.now(),
+      ...(body.agentName && { agentName: body.agentName }),
+      ...(body.agentRole && { agentRole: body.agentRole as any }),
+    });
+    await store.appendMessage(talkId, {
+      id: randomUUID(),
+      role: 'assistant',
+      content: directReply,
+      timestamp: Date.now(),
+      model,
+      ...(body.agentName && { agentName: body.agentName }),
+      ...(body.agentRole && { agentRole: body.agentRole as any }),
+    });
+    scheduleContextUpdate({
+      talkId,
+      userMessage: body.message,
+      assistantResponse: directReply,
+      model,
+      gatewayOrigin,
+      authToken,
+      store,
+      logger,
+    });
+    if (!res.writableEnded) {
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }
+    return;
+  }
 
   // Load context and pinned messages
   const contextMd = await store.getContextMd(talkId);
