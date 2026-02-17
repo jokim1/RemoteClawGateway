@@ -123,6 +123,11 @@ function extractDriveListLimit(message: string): number {
   return Math.min(100, Math.max(1, value));
 }
 
+function extractPdfPathFromMessage(message: string): string | undefined {
+  const match = message.match(/(\/[^\s\]\)'"`]+\.pdf)\b/i);
+  return match?.[1];
+}
+
 function prioritizeTurnToolInfos(tools: ToolInfo[], message: string): ToolInfo[] {
   let filtered = tools;
 
@@ -357,6 +362,9 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   const hasGoogleDocsReadTool = availableToolInfos.some(
     (tool) => tool.name.trim().toLowerCase() === 'google_docs_read',
   );
+  const hasPdfExtractTool = availableToolInfos.some(
+    (tool) => tool.name.trim().toLowerCase() === 'pdf_extract_text',
+  );
 
   // Deterministic Drive listing fast path:
   // bypass model/tool-chaining for common "recent drive files" requests.
@@ -428,6 +436,62 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     const directReply = docsResult.success
       ? docsResult.content
       : `Google Docs request failed: ${docsResult.content}`;
+
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.write(`event: meta\ndata: ${JSON.stringify({ userMessageId })}\n\n`);
+    res.write(`data: ${JSON.stringify({
+      choices: [{ delta: { content: directReply } }],
+      model,
+    })}\n\n`);
+    await store.appendMessage(talkId, {
+      id: userMessageId,
+      role: 'user',
+      content: body.message,
+      timestamp: Date.now(),
+      ...(body.agentName && { agentName: body.agentName }),
+      ...(body.agentRole && { agentRole: body.agentRole as any }),
+    });
+    await store.appendMessage(talkId, {
+      id: randomUUID(),
+      role: 'assistant',
+      content: directReply,
+      timestamp: Date.now(),
+      model,
+      ...(body.agentName && { agentName: body.agentName }),
+      ...(body.agentRole && { agentRole: body.agentRole as any }),
+    });
+    scheduleContextUpdate({
+      talkId,
+      userMessage: body.message,
+      assistantResponse: directReply,
+      model,
+      gatewayOrigin,
+      authToken,
+      store,
+      logger,
+    });
+    if (!res.writableEnded) {
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }
+    return;
+  }
+
+  // Deterministic PDF extraction fast path for uploaded files:
+  // bypass model/tool-chaining when user points at a PDF path.
+  const pdfPath = extractPdfPathFromMessage(body.message);
+  if (!isModelQuestion && pdfPath && hasPdfExtractTool) {
+    const userMessageId = randomUUID();
+    const pdfResult = await executor.execute('pdf_extract_text', JSON.stringify({
+      path: pdfPath,
+    }));
+    const directReply = pdfResult.success
+      ? pdfResult.content
+      : `PDF extraction failed: ${pdfResult.content}`;
 
     res.statusCode = 200;
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');

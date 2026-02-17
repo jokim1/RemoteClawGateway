@@ -285,6 +285,29 @@ const GOOGLE_DRIVE_FILES_TOOL: ToolDefinition = {
   },
 };
 
+const PDF_EXTRACT_TEXT_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'pdf_extract_text',
+    description:
+      'Extract text from a PDF file path available on the gateway host (typically uploaded files under /workspace/uploads).',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Path to PDF file. Prefer /workspace/uploads/<name>.pdf from upload notes.',
+        },
+        max_chars: {
+          type: 'number',
+          description: 'Optional max characters to return (default 20000, max 200000).',
+        },
+      },
+      required: ['path'],
+    },
+  },
+};
+
 const BUILTIN_TOOLS = new Map<string, ToolDefinition>([
   ['shell_exec', SHELL_EXEC_TOOL],
   ['manage_tools', MANAGE_TOOLS_TOOL],
@@ -294,6 +317,7 @@ const BUILTIN_TOOLS = new Map<string, ToolDefinition>([
   ['google_docs_auth_status', GOOGLE_DOCS_AUTH_STATUS_TOOL],
   ['google_drive_files', GOOGLE_DRIVE_FILES_TOOL],
   ['web_fetch_extract', WEB_FETCH_EXTRACT_TOOL],
+  ['pdf_extract_text', PDF_EXTRACT_TEXT_TOOL],
 ]);
 
 // ---------------------------------------------------------------------------

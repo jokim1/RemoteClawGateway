@@ -7,6 +7,9 @@
 
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
+import { access } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { extname, isAbsolute, join, resolve } from 'node:path';
 import type { Logger } from './types.js';
 import type { ToolRegistry } from './tool-registry.js';
 import {
@@ -30,6 +33,8 @@ const DEFAULT_TIMEOUT_S = 30;
 
 /** Maximum command timeout in seconds. */
 const MAX_TIMEOUT_S = 120;
+const DEFAULT_AGENT_WORKSPACE_DIR = join(homedir(), '.openclaw', 'workspace-clawtalk');
+const DEFAULT_DOWNLOADS_UPLOAD_DIR = join(homedir(), 'Downloads', 'ClawTalk');
 
 export interface ToolExecResult {
   success: boolean;
@@ -100,6 +105,9 @@ export class ToolExecutor {
           break;
         case 'web_fetch_extract':
           result = await this.execWebFetchExtract(args);
+          break;
+        case 'pdf_extract_text':
+          result = await this.execPdfExtractText(args);
           break;
         default:
           // Dynamic tools — execute via shell_exec with the tool's command template
@@ -634,5 +642,117 @@ export class ToolExecutor {
       const msg = err instanceof Error ? err.message : String(err);
       return { success: false, content: `web_fetch_extract failed: ${msg}`, durationMs: 0 };
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // PDF extraction
+  // -------------------------------------------------------------------------
+
+  private resolvePdfHostPath(rawPath: string): string {
+    const input = rawPath.trim();
+    if (!input) throw new Error('Missing required field: path');
+    if (!/\.pdf$/i.test(input)) throw new Error('Path must point to a .pdf file');
+
+    const workspaceRoot = (process.env.CLAWTALK_AGENT_WORKSPACE_DIR || DEFAULT_AGENT_WORKSPACE_DIR).trim() || DEFAULT_AGENT_WORKSPACE_DIR;
+    const allowedRoots = [
+      resolve(workspaceRoot),
+      resolve(DEFAULT_DOWNLOADS_UPLOAD_DIR),
+    ];
+
+    let candidate: string;
+    if (input.startsWith('/workspace/')) {
+      const rel = input.slice('/workspace/'.length);
+      candidate = resolve(workspaceRoot, rel);
+    } else if (isAbsolute(input)) {
+      candidate = resolve(input);
+    } else {
+      candidate = resolve(workspaceRoot, input);
+    }
+
+    const inAllowedRoot = allowedRoots.some((root) => candidate === root || candidate.startsWith(`${root}/`));
+    if (!inAllowedRoot) {
+      throw new Error(`PDF path is outside allowed roots. Allowed: ${allowedRoots.join(', ')}`);
+    }
+    if (extname(candidate).toLowerCase() !== '.pdf') {
+      throw new Error('Path must end in .pdf');
+    }
+    return candidate;
+  }
+
+  private async execPdfExtractText(args: Record<string, unknown>): Promise<ToolExecResult> {
+    const inputPath = String(args.path ?? '').trim();
+    const maxChars = Math.max(500, Math.min(200_000, Number(args.max_chars) || 20_000));
+
+    let hostPath: string;
+    try {
+      hostPath = this.resolvePdfHostPath(inputPath);
+    } catch (err) {
+      return {
+        success: false,
+        content: err instanceof Error ? err.message : String(err),
+        durationMs: 0,
+      };
+    }
+
+    try {
+      await access(hostPath, fsConstants.R_OK);
+    } catch {
+      return {
+        success: false,
+        content: `PDF file is not readable at: ${hostPath}`,
+        durationMs: 0,
+      };
+    }
+
+    const extraction = await new Promise<{ ok: boolean; text: string; error?: string }>((resolvePromise) => {
+      const proc = spawn('pdftotext', ['-layout', '-enc', 'UTF-8', hostPath, '-'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const out: Buffer[] = [];
+      const err: Buffer[] = [];
+      proc.stdout.on('data', (chunk: Buffer) => out.push(chunk));
+      proc.stderr.on('data', (chunk: Buffer) => err.push(chunk));
+      proc.on('error', (spawnErr) => {
+        resolvePromise({ ok: false, text: '', error: `pdftotext failed to start: ${spawnErr.message}` });
+      });
+      proc.on('close', (code) => {
+        const stderr = Buffer.concat(err).toString('utf-8').trim();
+        if (code !== 0) {
+          resolvePromise({ ok: false, text: '', error: stderr || `pdftotext exited with code ${code}` });
+          return;
+        }
+        const text = Buffer.concat(out).toString('utf-8');
+        resolvePromise({ ok: true, text });
+      });
+    });
+
+    if (!extraction.ok) {
+      return {
+        success: false,
+        content:
+          `pdf_extract_text failed: ${extraction.error}\n` +
+          'Ensure poppler/pdftotext is installed on the gateway host.',
+        durationMs: 0,
+      };
+    }
+
+    const normalized = extraction.text.replace(/\r\n/g, '\n').trim();
+    if (!normalized) {
+      return {
+        success: false,
+        content: 'No readable text extracted from PDF (possibly scanned image PDF).',
+        durationMs: 0,
+      };
+    }
+    const clipped = normalized.length > maxChars;
+    const output = clipped ? normalized.slice(0, maxChars) : normalized;
+    return {
+      success: true,
+      content:
+        `PDF: ${hostPath}\n` +
+        `Characters: ${normalized.length}${clipped ? ` (clipped to ${maxChars})` : ''}\n\n` +
+        output,
+      durationMs: 0,
+    };
   }
 }
