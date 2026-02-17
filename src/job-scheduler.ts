@@ -781,10 +781,18 @@ Provide a concise report of your findings or actions. Start with a one-line summ
     const sessionKey = talkExecutionMode === 'unsandboxed'
       ? buildUnsandboxedTalkSessionKey(talkId)
       : buildTalkJobSessionKey(talkId, job.id, CLAWTALK_DEFAULT_AGENT_ID);
+    // Do NOT send x-openclaw-agent-id here.  When that header is present
+    // OpenClaw activates its embedded agent, which replaces the `tools`
+    // parameter with its own tool set (Read/Write/exec/…).  Gateway tools
+    // like google_docs_append are then only described in the system prompt
+    // but never exposed as callable functions.
+    //
+    // Without the header OpenClaw acts as a transparent LLM proxy, the
+    // `tools` array is forwarded to the model, and the gateway's
+    // runToolLoopNonStreaming handles tool calls through the ToolExecutor.
     const extraHeaders: Record<string, string> = {
       'x-openclaw-session-key': sessionKey,
       'x-openclaw-trace-id': traceId,
-      'x-openclaw-agent-id': CLAWTALK_DEFAULT_AGENT_ID,
     };
 
     const result = await runToolLoopNonStreaming({
