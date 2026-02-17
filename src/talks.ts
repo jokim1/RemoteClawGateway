@@ -145,6 +145,13 @@ function normalizeToolModeInput(raw: unknown): 'off' | 'confirm' | 'auto' | unde
   return undefined;
 }
 
+function normalizeExecutionModeInput(raw: unknown): 'inherit' | 'sandboxed' | 'unsandboxed' | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const value = raw.trim().toLowerCase();
+  if (value === 'inherit' || value === 'sandboxed' || value === 'unsandboxed') return value;
+  return undefined;
+}
+
 function normalizeToolNameListInput(raw: unknown): string[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const seen = new Set<string>();
@@ -958,11 +965,13 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
     platformBehaviors?: any[];
     channelResponseSettings?: any[];
     toolMode?: string;
+    executionMode?: string;
     toolsAllow?: string[];
     toolsDeny?: string[];
     googleAuthProfile?: string;
     toolPolicy?: {
       mode?: string;
+      executionMode?: string;
       allow?: string[];
       deny?: string[];
       googleAuthProfile?: string;
@@ -992,6 +1001,9 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
   if (body.toolsAllow === undefined && body.toolPolicy?.allow !== undefined) {
     body.toolsAllow = body.toolPolicy.allow;
   }
+  if (body.executionMode === undefined && body.toolPolicy?.executionMode !== undefined) {
+    body.executionMode = body.toolPolicy.executionMode;
+  }
   if (body.toolsDeny === undefined && body.toolPolicy?.deny !== undefined) {
     body.toolsDeny = body.toolPolicy.deny;
   }
@@ -1002,6 +1014,11 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
   const toolMode = normalizeToolModeInput(body.toolMode);
   if (body.toolMode !== undefined && toolMode === undefined) {
     sendJson(ctx.res, 400, { error: 'toolMode must be one of: off, confirm, auto' });
+    return;
+  }
+  const executionMode = normalizeExecutionModeInput(body.executionMode);
+  if (body.executionMode !== undefined && executionMode === undefined) {
+    sendJson(ctx.res, 400, { error: 'executionMode must be one of: inherit, sandboxed, unsandboxed' });
     return;
   }
   const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
@@ -1056,6 +1073,7 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
     ...(body.platformBindings !== undefined ? { platformBindings: body.platformBindings } : {}),
     ...(body.platformBehaviors !== undefined ? { platformBehaviors: body.platformBehaviors } : {}),
     ...(toolMode !== undefined ? { toolMode } : {}),
+    ...(executionMode !== undefined ? { executionMode } : {}),
     ...(toolsAllow !== undefined ? { toolsAllow } : {}),
     ...(toolsDeny !== undefined ? { toolsDeny } : {}),
     ...(googleAuthProfile !== undefined ? { googleAuthProfile: googleAuthProfile || undefined } : {}),
@@ -1116,6 +1134,8 @@ async function handleGetTalkTools(
   sendJson(ctx.res, 200, {
     talkId,
     toolMode: talk.toolMode ?? 'auto',
+    executionMode: talk.executionMode ?? 'inherit',
+    executionModeOptions: ['inherit', 'sandboxed', 'unsandboxed'],
     toolsAllow: talk.toolsAllow ?? [],
     toolsDeny: talk.toolsDeny ?? [],
     googleAuthProfile: talk.googleAuthProfile,
@@ -1132,6 +1152,7 @@ async function handleUpdateTalkTools(
 ): Promise<void> {
   let body: {
     toolMode?: string;
+    executionMode?: string;
     toolsAllow?: string[];
     toolsDeny?: string[];
     googleAuthProfile?: string;
@@ -1154,6 +1175,11 @@ async function handleUpdateTalkTools(
     sendJson(ctx.res, 400, { error: 'toolMode must be one of: off, confirm, auto' });
     return;
   }
+  const executionMode = normalizeExecutionModeInput(body.executionMode);
+  if (body.executionMode !== undefined && executionMode === undefined) {
+    sendJson(ctx.res, 400, { error: 'executionMode must be one of: inherit, sandboxed, unsandboxed' });
+    return;
+  }
   const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
   const toolsDeny = normalizeToolNameListInput(body.toolsDeny);
   const googleAuthProfile = normalizeGoogleAuthProfileInput(body.googleAuthProfile);
@@ -1164,6 +1190,7 @@ async function handleUpdateTalkTools(
 
   const updated = store.updateTalk(talkId, {
     ...(toolMode !== undefined ? { toolMode } : {}),
+    ...(executionMode !== undefined ? { executionMode } : {}),
     ...(toolsAllow !== undefined ? { toolsAllow } : {}),
     ...(toolsDeny !== undefined ? { toolsDeny } : {}),
     ...(googleAuthProfile !== undefined ? { googleAuthProfile: googleAuthProfile || undefined } : {}),
@@ -1180,6 +1207,8 @@ async function handleUpdateTalkTools(
   sendJson(ctx.res, 200, {
     talkId,
     toolMode: updated.toolMode ?? 'auto',
+    executionMode: updated.executionMode ?? 'inherit',
+    executionModeOptions: ['inherit', 'sandboxed', 'unsandboxed'],
     toolsAllow: updated.toolsAllow ?? [],
     toolsDeny: updated.toolsDeny ?? [],
     googleAuthProfile: updated.googleAuthProfile,
@@ -1202,11 +1231,13 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
     platformBehaviors?: any[];
     channelResponseSettings?: any[];
     toolMode?: string;
+    executionMode?: string;
     toolsAllow?: string[];
     toolsDeny?: string[];
     googleAuthProfile?: string;
     toolPolicy?: {
       mode?: string;
+      executionMode?: string;
       allow?: string[];
       deny?: string[];
       googleAuthProfile?: string;
@@ -1243,6 +1274,9 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
   if (body.toolsAllow === undefined && body.toolPolicy?.allow !== undefined) {
     body.toolsAllow = body.toolPolicy.allow;
   }
+  if (body.executionMode === undefined && body.toolPolicy?.executionMode !== undefined) {
+    body.executionMode = body.toolPolicy.executionMode;
+  }
   if (body.toolsDeny === undefined && body.toolPolicy?.deny !== undefined) {
     body.toolsDeny = body.toolPolicy.deny;
   }
@@ -1253,6 +1287,11 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
   const toolMode = normalizeToolModeInput(body.toolMode);
   if (body.toolMode !== undefined && toolMode === undefined) {
     sendJson(ctx.res, 400, { error: 'toolMode must be one of: off, confirm, auto' });
+    return;
+  }
+  const executionMode = normalizeExecutionModeInput(body.executionMode);
+  if (body.executionMode !== undefined && executionMode === undefined) {
+    sendJson(ctx.res, 400, { error: 'executionMode must be one of: inherit, sandboxed, unsandboxed' });
     return;
   }
   const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
@@ -1323,6 +1362,7 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
     platformBindings: body.platformBindings,
     platformBehaviors: body.platformBehaviors,
     toolMode,
+    executionMode,
     toolsAllow,
     toolsDeny,
     ...(googleAuthProfile !== undefined ? { googleAuthProfile: googleAuthProfile || undefined } : {}),

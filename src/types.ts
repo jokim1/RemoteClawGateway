@@ -252,6 +252,8 @@ export interface TalkMeta {
   model?: string;
   /** Tool execution mode for this talk. */
   toolMode?: 'off' | 'confirm' | 'auto';
+  /** Runtime selection for tool execution in this talk. */
+  executionMode?: 'inherit' | 'sandboxed' | 'unsandboxed';
   /** Optional allow-list of tool names for this talk (empty = all). */
   toolsAllow?: string[];
   /** Optional deny-list of tool names for this talk. */

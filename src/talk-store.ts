@@ -59,6 +59,12 @@ function normalizeToolMode(raw: unknown): 'off' | 'confirm' | 'auto' {
   return 'auto';
 }
 
+function normalizeExecutionMode(raw: unknown): 'inherit' | 'sandboxed' | 'unsandboxed' {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (value === 'inherit' || value === 'sandboxed' || value === 'unsandboxed') return value;
+  return 'inherit';
+}
+
 function normalizeToolNames(input: unknown): string[] {
   if (!Array.isArray(input)) return [];
   const seen = new Set<string>();
@@ -219,6 +225,7 @@ export class TalkStore {
           meta.platformBindings = normalizePlatformBindings(meta.platformBindings);
           meta.platformBehaviors = normalizePlatformBehaviors(meta.platformBehaviors, meta.platformBindings);
           meta.toolMode = normalizeToolMode(meta.toolMode);
+          meta.executionMode = normalizeExecutionMode(meta.executionMode);
           meta.toolsAllow = normalizeToolNames(meta.toolsAllow);
           meta.toolsDeny = normalizeToolNames(meta.toolsDeny);
           meta.googleAuthProfile = normalizeGoogleAuthProfile(meta.googleAuthProfile);
@@ -260,6 +267,7 @@ export class TalkStore {
       directives: [],
       platformBindings: [],
       platformBehaviors: [],
+      executionMode: 'inherit',
       toolMode: 'auto',
       toolsAllow: [],
       toolsDeny: [],
@@ -289,7 +297,7 @@ export class TalkStore {
     updates: Partial<
       Pick<
         TalkMeta,
-        'topicTitle' | 'objective' | 'model' | 'directives' | 'platformBindings' | 'platformBehaviors' | 'toolMode' | 'toolsAllow' | 'toolsDeny' | 'googleAuthProfile'
+        'topicTitle' | 'objective' | 'model' | 'directives' | 'platformBindings' | 'platformBehaviors' | 'toolMode' | 'executionMode' | 'toolsAllow' | 'toolsDeny' | 'googleAuthProfile'
       >
     >,
   ): TalkMeta | null {
@@ -312,6 +320,9 @@ export class TalkStore {
     }
     if (updates.toolMode !== undefined) {
       meta.toolMode = normalizeToolMode(updates.toolMode);
+    }
+    if (updates.executionMode !== undefined) {
+      meta.executionMode = normalizeExecutionMode(updates.executionMode);
     }
     if (updates.toolsAllow !== undefined) {
       meta.toolsAllow = normalizeToolNames(updates.toolsAllow);

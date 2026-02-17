@@ -185,6 +185,10 @@ function buildTalkSessionKey(talkId: string, agentPart: string, lanePart?: strin
     : `agent:${agent}:clawtalk:talk:${talk}:chat`;
 }
 
+function buildTalkMainSessionKey(agentPart: string): string {
+  return `agent:${sanitizeSessionPart(agentPart) || CLAWTALK_DEFAULT_AGENT_ID}:main`;
+}
+
 function buildRunScopedSessionPart(basePart: string, model: string, traceId: string): string {
   const base = sanitizeSessionPart(basePart) || 'talk';
   const modelPart = sanitizeSessionPart(model).slice(0, 20) || 'model';
@@ -571,8 +575,15 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     model,
     traceId,
   );
+  const talkExecutionMode = meta.executionMode ?? 'inherit';
+  const sessionKey = (() => {
+    if (talkExecutionMode === 'unsandboxed') {
+      return buildTalkMainSessionKey(resolvedSessionAgentId);
+    }
+    return buildTalkSessionKey(talkId, resolvedSessionAgentId, runScopedSessionPart);
+  })();
   const extraHeaders: Record<string, string> = {
-    'x-openclaw-session-key': buildTalkSessionKey(talkId, resolvedSessionAgentId, runScopedSessionPart),
+    'x-openclaw-session-key': sessionKey,
     'x-openclaw-trace-id': traceId,
   };
   if (resolvedHeaderAgentId?.trim()) {
@@ -580,7 +591,7 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   }
   logger.info(
     `ModelRoute trace=${traceId} flow=talk-chat talkId=${talkId} requestedModel=${routeDiag.requestedModel} `
-    + `sessionRoutePart=${sessionRoutePart} runScopedSessionPart=${runScopedSessionPart} sessionKey=${extraHeaders['x-openclaw-session-key']} `
+    + `sessionRoutePart=${sessionRoutePart} runScopedSessionPart=${runScopedSessionPart} executionMode=${talkExecutionMode} sessionKey=${extraHeaders['x-openclaw-session-key']} `
     + `inboundAgentId=${inboundAgentId ?? '-'} `
     + `headerAgentId=${routing.headerAgentId ?? '-'} effectiveHeaderAgentId=${resolvedHeaderAgentId ?? '-'} `
     + `configuredAgentId=${routeDiag.configuredAgentId ?? '-'} `

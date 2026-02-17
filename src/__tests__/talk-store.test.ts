@@ -36,6 +36,8 @@ describe('Talk CRUD', () => {
     expect(talk.model).toBe('test-model');
     expect(talk.pinnedMessageIds).toEqual([]);
     expect(talk.jobs).toEqual([]);
+    expect(talk.toolMode).toBe('auto');
+    expect(talk.executionMode).toBe('inherit');
     expect(talk.createdAt).toBeGreaterThan(0);
     expect(talk.updatedAt).toBeGreaterThan(0);
   });
@@ -74,11 +76,13 @@ describe('Talk CRUD', () => {
       topicTitle: 'Sprint Planning',
       objective: 'Plan Q2 sprint',
       model: 'claude-sonnet',
+      executionMode: 'unsandboxed',
     });
     expect(updated).not.toBeNull();
     expect(updated!.topicTitle).toBe('Sprint Planning');
     expect(updated!.objective).toBe('Plan Q2 sprint');
     expect(updated!.model).toBe('claude-sonnet');
+    expect(updated!.executionMode).toBe('unsandboxed');
     expect(updated!.updatedAt).toBeGreaterThanOrEqual(talk.updatedAt);
   });
 
