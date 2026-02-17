@@ -595,7 +595,7 @@ function isCronDue(parts: string[], lastRunAt: number): boolean {
   if (!cronFieldMatches(parts[1], currentHour)) return false;
   if (!cronFieldMatches(parts[2], currentDom)) return false;
   if (!cronFieldMatches(parts[3], currentMonth)) return false;
-  if (!cronFieldMatches(parts[4], currentDow)) return false;
+  if (!cronDayOfWeekMatches(parts[4], currentDow)) return false;
 
   // Don't re-run within the same minute
   const lastRunDate = new Date(lastRunAt);
@@ -634,6 +634,13 @@ function cronFieldMatches(field: string, value: number): boolean {
     // Exact value
     if (parseInt(part, 10) === value) return true;
   }
+  return false;
+}
+
+function cronDayOfWeekMatches(field: string, currentDow: number): boolean {
+  // Accept either 0 or 7 for Sunday.
+  if (cronFieldMatches(field, currentDow)) return true;
+  if (currentDow === 0 && cronFieldMatches(field, 7)) return true;
   return false;
 }
 

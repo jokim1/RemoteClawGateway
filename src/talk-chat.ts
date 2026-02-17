@@ -19,6 +19,7 @@ import { scheduleContextUpdate } from './context-updater.js';
 import { runToolLoop } from './tool-loop.js';
 import { collectRoutingDiagnostics } from './model-routing-diagnostics.js';
 import { getToolCatalog } from './tool-catalog.js';
+import { parseEventTrigger, validateSchedule } from './job-scheduler.js';
 
 /** Maximum number of history messages to include in LLM context. */
 const MAX_CONTEXT_MESSAGES = 50;
@@ -718,17 +719,50 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
       // Auto-create jobs from ```job``` blocks in the response
       const jobBlocks = parseJobBlocks(fullContent);
       for (const { schedule, prompt } of jobBlocks) {
+        const scheduleError = validateSchedule(schedule);
+        if (scheduleError) {
+          logger.warn(`TalkChat: skipped auto-created job with invalid schedule "${schedule}": ${scheduleError}`);
+          continue;
+        }
+
+        let normalizedSchedule = schedule;
+        const eventScope = parseEventTrigger(schedule);
         let type: 'once' | 'recurring' | 'event';
-        if (/^on\s+/i.test(schedule)) {
+        if (eventScope) {
+          const bindings = meta.platformBindings ?? [];
+          let resolvedScope = eventScope;
+          const platformMatch = eventScope.match(/^platform(\d+)$/i);
+          if (platformMatch) {
+            const idx = parseInt(platformMatch[1], 10);
+            if (idx < 1 || idx > bindings.length) {
+              logger.warn(
+                `TalkChat: skipped auto-created event job with unknown platform index platform${idx} in talk ${talkId}`,
+              );
+              continue;
+            }
+            resolvedScope = bindings[idx - 1].scope;
+          }
+
+          const matchingBinding = bindings.find(
+            b => b.scope.toLowerCase() === resolvedScope.toLowerCase(),
+          );
+          if (!matchingBinding) {
+            logger.warn(
+              `TalkChat: skipped auto-created event job with unbound scope "${resolvedScope}" in talk ${talkId}`,
+            );
+            continue;
+          }
+
+          normalizedSchedule = `on ${resolvedScope}`;
           type = 'event';
-        } else if (/^(in\s|at\s)/i.test(schedule)) {
+        } else if (/^(in\s|at\s)/i.test(normalizedSchedule)) {
           type = 'once';
         } else {
           type = 'recurring';
         }
-        const job = store.addJob(talkId, schedule, prompt, type);
+        const job = store.addJob(talkId, normalizedSchedule, prompt, type);
         if (job) {
-          logger.info(`TalkChat: auto-created ${type} job ${job.id} [${schedule}] for talk ${talkId}`);
+          logger.info(`TalkChat: auto-created ${type} job ${job.id} [${normalizedSchedule}] for talk ${talkId}`);
         }
       }
 

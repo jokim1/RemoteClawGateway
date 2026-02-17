@@ -394,13 +394,14 @@ describe('Job management', () => {
     expect(store.listJobs('nonexistent')).toEqual([]);
   });
 
-  it('updateJob updates active, schedule, prompt, lastRunAt, lastStatus', () => {
+  it('updateJob updates active, type, schedule, prompt, lastRunAt, lastStatus', () => {
     const talk = store.createTalk();
     const job = store.addJob(talk.id, '0 9 * * *', 'Original prompt');
 
     const now = Date.now();
     const updated = store.updateJob(talk.id, job!.id, {
       active: false,
+      type: 'event',
       schedule: '0 10 * * *',
       prompt: 'Updated prompt',
       lastRunAt: now,
@@ -409,6 +410,7 @@ describe('Job management', () => {
 
     expect(updated).not.toBeNull();
     expect(updated!.active).toBe(false);
+    expect(updated!.type).toBe('event');
     expect(updated!.schedule).toBe('0 10 * * *');
     expect(updated!.prompt).toBe('Updated prompt');
     expect(updated!.lastRunAt).toBe(now);

@@ -156,13 +156,20 @@ describe('isJobDue (interval schedules)', () => {
 
 describe('isJobDue (daily schedules)', () => {
   it('returns true when now is past the daily target and no run today', () => {
-    // Build a target time that is 2 hours in the past today
-    const twoHoursAgo = new Date();
-    twoHoursAgo.setHours(twoHoursAgo.getHours() - 2);
-    twoHoursAgo.setMinutes(0, 0, 0);
+    // Build a target that is guaranteed to be in the past on the same calendar day.
+    const now = new Date();
+    const past = new Date(now);
+    if (now.getMinutes() > 0) {
+      past.setHours(now.getHours(), now.getMinutes() - 1, 0, 0);
+    } else if (now.getHours() > 0) {
+      past.setHours(now.getHours() - 1, 59, 0, 0);
+    } else {
+      // At 00:00 there is no earlier minute on the same day; skip this edge.
+      expect(true).toBe(true);
+      return;
+    }
 
-    const hour = twoHoursAgo.getHours();
-    const schedule = hour < 12 ? `daily ${hour}am` : `daily ${hour === 12 ? 12 : hour - 12}pm`;
+    const schedule = `daily ${past.getHours()}:${String(past.getMinutes()).padStart(2, '0')}`;
 
     const job = makeJob({
       schedule,
@@ -172,18 +179,25 @@ describe('isJobDue (daily schedules)', () => {
   });
 
   it('returns false when lastRunAt is after today\'s target time', () => {
-    // Build a target time 2 hours in the past today
-    const twoHoursAgo = new Date();
-    twoHoursAgo.setHours(twoHoursAgo.getHours() - 2);
-    twoHoursAgo.setMinutes(0, 0, 0);
+    // Build a target that is guaranteed to be in the past on the same calendar day.
+    const now = new Date();
+    const past = new Date(now);
+    if (now.getMinutes() > 0) {
+      past.setHours(now.getHours(), now.getMinutes() - 1, 0, 0);
+    } else if (now.getHours() > 0) {
+      past.setHours(now.getHours() - 1, 59, 0, 0);
+    } else {
+      // At 00:00 there is no earlier minute on the same day; skip this edge.
+      expect(true).toBe(true);
+      return;
+    }
 
-    const hour = twoHoursAgo.getHours();
-    const schedule = hour < 12 ? `daily ${hour}am` : `daily ${hour === 12 ? 12 : hour - 12}pm`;
+    const schedule = `daily ${past.getHours()}:${String(past.getMinutes()).padStart(2, '0')}`;
 
-    // lastRunAt is 1 hour ago — which is AFTER the 2-hours-ago target
+    // lastRunAt is now — definitely after the past target on the same day.
     const job = makeJob({
       schedule,
-      lastRunAt: Date.now() - 3_600_000,
+      lastRunAt: Date.now(),
     });
     expect(isJobDue(job)).toBe(false);
   });

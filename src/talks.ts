@@ -1515,6 +1515,12 @@ async function handleListJobs(ctx: HandlerContext, store: TalkStore, talkId: str
 }
 
 async function handleUpdateJob(ctx: HandlerContext, store: TalkStore, talkId: string, jobId: string): Promise<void> {
+  const talk = store.getTalk(talkId);
+  if (!talk) {
+    sendJson(ctx.res, 404, { error: 'Talk not found' });
+    return;
+  }
+
   let body: { active?: boolean; schedule?: string; prompt?: string };
   try {
     body = (await readJsonBody(ctx.req)) as typeof body;
@@ -1523,15 +1529,54 @@ async function handleUpdateJob(ctx: HandlerContext, store: TalkStore, talkId: st
     return;
   }
 
+  let nextType: 'once' | 'recurring' | 'event' | undefined;
   if (body.schedule) {
     const scheduleError = validateSchedule(body.schedule);
     if (scheduleError) {
       sendJson(ctx.res, 400, { error: scheduleError });
       return;
     }
+
+    const eventScope = parseEventTrigger(body.schedule);
+    if (eventScope) {
+      const bindings = talk.platformBindings ?? [];
+
+      let resolvedScope = eventScope;
+      const platformMatch = eventScope.match(/^platform(\d+)$/i);
+      if (platformMatch) {
+        const idx = parseInt(platformMatch[1], 10);
+        if (idx < 1 || idx > bindings.length) {
+          sendJson(ctx.res, 400, {
+            error: `No platform binding at position ${idx}. This talk has ${bindings.length} binding(s).`,
+          });
+          return;
+        }
+        resolvedScope = bindings[idx - 1].scope;
+      }
+
+      const matchingBinding = bindings.find(
+        b => b.scope.toLowerCase() === resolvedScope.toLowerCase(),
+      );
+      if (!matchingBinding) {
+        sendJson(ctx.res, 400, {
+          error: `No platform binding found for "${resolvedScope}". Add a channel connection first.`,
+        });
+        return;
+      }
+
+      body.schedule = `on ${resolvedScope}`;
+      nextType = 'event';
+    } else if (/^(in\s|at\s)/i.test(body.schedule)) {
+      nextType = 'once';
+    } else {
+      nextType = 'recurring';
+    }
   }
 
-  const updated = store.updateJob(talkId, jobId, body);
+  const updated = store.updateJob(talkId, jobId, {
+    ...body,
+    ...(nextType ? { type: nextType } : {}),
+  });
   if (!updated) {
     sendJson(ctx.res, 404, { error: 'Job not found' });
     return;

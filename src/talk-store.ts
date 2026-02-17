@@ -657,13 +657,14 @@ export class TalkStore {
     return meta?.jobs ?? [];
   }
 
-  updateJob(talkId: string, jobId: string, updates: Partial<Pick<TalkJob, 'active' | 'schedule' | 'prompt' | 'lastRunAt' | 'lastStatus'>>): TalkJob | null {
+  updateJob(talkId: string, jobId: string, updates: Partial<Pick<TalkJob, 'active' | 'type' | 'schedule' | 'prompt' | 'lastRunAt' | 'lastStatus'>>): TalkJob | null {
     const meta = this.talks.get(talkId);
     if (!meta) return null;
     const job = meta.jobs.find(j => j.id === jobId);
     if (!job) return null;
 
     if (updates.active !== undefined) job.active = updates.active;
+    if (updates.type !== undefined) job.type = updates.type;
     if (updates.schedule !== undefined) job.schedule = updates.schedule;
     if (updates.prompt !== undefined) job.prompt = updates.prompt;
     if (updates.lastRunAt !== undefined) job.lastRunAt = updates.lastRunAt;
