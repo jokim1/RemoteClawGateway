@@ -676,7 +676,14 @@ export async function upsertGoogleDocsAuthConfig(
 export async function listGoogleDocsAuthProfiles(): Promise<{
   tokenPath: string;
   activeProfile: string;
-  profiles: Array<{ name: string; hasClientId: boolean; hasClientSecret: boolean; hasRefreshToken: boolean }>;
+  profiles: Array<{
+    name: string;
+    hasClientId: boolean;
+    hasClientSecret: boolean;
+    hasRefreshToken: boolean;
+    accountEmail?: string;
+    accountDisplayName?: string;
+  }>;
 }> {
   const tokenPath = resolveTokenPath();
   let store: OAuthTokenStore = {
@@ -693,17 +700,42 @@ export async function listGoogleDocsAuthProfiles(): Promise<{
   const activeProfile = normalizeProfileName(store.activeProfile);
   const names = new Set<string>(Object.keys(store.profiles ?? {}));
   names.add(activeProfile);
-  const profiles = Array.from(names)
-    .sort((a, b) => a.localeCompare(b))
-    .map((name) => {
-      const record = mergeEnvOAuthOverrides(name, (store.profiles ?? {})[name] ?? {});
-      return {
-        name,
-        hasClientId: Boolean(record.client_id?.trim()),
-        hasClientSecret: Boolean(record.client_secret?.trim()),
-        hasRefreshToken: Boolean(record.refresh_token?.trim()),
-      };
-    });
+  const profiles = await Promise.all(
+    Array.from(names)
+      .sort((a, b) => a.localeCompare(b))
+      .map(async (name) => {
+        const record = mergeEnvOAuthOverrides(name, (store.profiles ?? {})[name] ?? {});
+        const hasClientId = Boolean(record.client_id?.trim());
+        const hasClientSecret = Boolean(record.client_secret?.trim());
+        const hasRefreshToken = Boolean(record.refresh_token?.trim());
+        let accountEmail: string | undefined;
+        let accountDisplayName: string | undefined;
+
+        // Best-effort identity lookup to make profile selection clear in clients.
+        if (hasClientId && hasClientSecret && hasRefreshToken) {
+          try {
+            const about = await googleFetchJson(
+              'https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,displayName)',
+              { method: 'GET' },
+              name,
+            );
+            accountEmail = typeof about?.user?.emailAddress === 'string' ? about.user.emailAddress : undefined;
+            accountDisplayName = typeof about?.user?.displayName === 'string' ? about.user.displayName : undefined;
+          } catch {
+            // Ignore lookup failures; readiness fields still indicate auth state.
+          }
+        }
+
+        return {
+          name,
+          hasClientId,
+          hasClientSecret,
+          hasRefreshToken,
+          ...(accountEmail ? { accountEmail } : {}),
+          ...(accountDisplayName ? { accountDisplayName } : {}),
+        };
+      }),
+  );
   return { tokenPath, activeProfile, profiles };
 }
 
