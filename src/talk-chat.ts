@@ -97,6 +97,12 @@ function hasExplicitToolApproval(message: string): boolean {
   );
 }
 
+function isMentionRelayPrompt(message: string): boolean {
+  const text = message.trim().toLowerCase();
+  if (!text) return false;
+  return /^\[[^\]]*mentioned you[^\]]*\]$/.test(text);
+}
+
 function isGoogleDriveIntent(message: string): boolean {
   const text = message.trim().toLowerCase();
   if (!text) return false;
@@ -330,11 +336,12 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   const isModelQuestion = isModelIdentityQuestion(body.message);
   const talkToolMode = meta.toolMode ?? 'auto';
   const likelyActionRequest = isLikelyActionRequest(body.message);
+  const mentionRelayPrompt = isMentionRelayPrompt(body.message);
   const explicitToolApproval = hasExplicitToolApproval(body.message);
   const enableToolsForTurn = !isModelQuestion
     && talkToolMode !== 'off'
     && (
-      (talkToolMode === 'auto' && likelyActionRequest)
+      (talkToolMode === 'auto' && (likelyActionRequest || mentionRelayPrompt))
       || (talkToolMode === 'confirm' && explicitToolApproval)
     );
   const catalog = getToolCatalog(dataDir, logger);
@@ -557,7 +564,9 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
         ? 'tool-mode-off'
         : talkToolMode === 'confirm' && !explicitToolApproval
           ? 'tool-confirm-awaiting-approval'
-          : 'non-action-turn';
+          : mentionRelayPrompt
+            ? 'mention-relay'
+            : 'non-action-turn';
     logger.info(`TalkChat: tool bypass (${reason}) talkId=${talkId}`);
   }
 
