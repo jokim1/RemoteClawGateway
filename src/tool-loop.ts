@@ -97,6 +97,28 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function isGoogleToolName(toolName: string): boolean {
+  return /^google_(docs|drive)_/i.test(toolName);
+}
+
+function withDefaultGoogleProfile(
+  toolName: string,
+  argsJson: string,
+  defaultProfile: string | undefined,
+): string {
+  const profile = defaultProfile?.trim();
+  if (!profile || !isGoogleToolName(toolName)) return argsJson;
+  try {
+    const parsed = JSON.parse(argsJson) as Record<string, unknown>;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.profile === undefined) {
+      return JSON.stringify({ ...parsed, profile });
+    }
+  } catch {
+    // keep original args if JSON parse fails; executor will surface the error
+  }
+  return argsJson;
+}
+
 /** Accumulated tool call fragment from streaming delta. */
 interface ToolCallAccumulator {
   id: string;
@@ -132,6 +154,8 @@ export interface ToolLoopStreamOptions {
   clientSignal?: AbortSignal;
   /** Correlation id for model routing diagnostics. */
   traceId?: string;
+  /** Optional default Google auth profile for this run. */
+  defaultGoogleAuthProfile?: string;
 }
 
 export interface ToolLoopStreamResult {
@@ -408,7 +432,10 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
           })}\n\n`);
           abort.touch();
 
-          const result = await executor.execute(tc.function.name, tc.function.arguments);
+          const result = await executor.execute(
+            tc.function.name,
+            withDefaultGoogleProfile(tc.function.name, tc.function.arguments, opts.defaultGoogleAuthProfile),
+          );
 
           // Send tool_end event to client
           res.write(`event: tool_end\ndata: ${JSON.stringify({
@@ -489,6 +516,8 @@ export interface ToolLoopNonStreamOptions {
   logger: Logger;
   timeoutMs?: number;
   toolChoice?: 'auto' | 'none';
+  /** Optional default Google auth profile for this run. */
+  defaultGoogleAuthProfile?: string;
 }
 
 export interface ToolLoopNonStreamResult {
@@ -567,7 +596,10 @@ export async function runToolLoopNonStreaming(opts: ToolLoopNonStreamOptions): P
 
       // Execute each tool
       for (const tc of toolCalls) {
-        const result = await executor.execute(tc.function.name, tc.function.arguments);
+        const result = await executor.execute(
+          tc.function.name,
+          withDefaultGoogleProfile(tc.function.name, tc.function.arguments, opts.defaultGoogleAuthProfile),
+        );
         messages.push({
           role: 'tool',
           content: result.content,

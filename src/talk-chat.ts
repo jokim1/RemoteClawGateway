@@ -330,6 +330,7 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     const driveResult = await executor.execute('google_drive_files', JSON.stringify({
       action: 'list',
       page_size: driveLimit,
+      ...(meta.googleAuthProfile ? { profile: meta.googleAuthProfile } : {}),
     }));
     const directReply = driveResult.success
       ? driveResult.content
@@ -643,6 +644,7 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
       maxTotalMs: resolveTalkTotalTimeoutMs(),
       maxIterations,
       toolChoice: disableTools ? 'none' : 'auto',
+      defaultGoogleAuthProfile: meta.googleAuthProfile,
     });
 
     fullContent = result.fullContent;

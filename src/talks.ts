@@ -19,7 +19,13 @@ import { sendJson, readJsonBody } from './http.js';
 import { validateSchedule, parseEventTrigger } from './job-scheduler.js';
 import { reconcileSlackRoutingForTalks } from './slack-routing-sync.js';
 import { randomUUID } from 'node:crypto';
-import { googleDocsAuthStatus, upsertGoogleDocsAuthConfig } from './google-docs.js';
+import {
+  googleDocsAuthStatus,
+  googleDocsAuthStatusForProfile,
+  listGoogleDocsAuthProfiles,
+  setGoogleDocsActiveProfile,
+  upsertGoogleDocsAuthConfig,
+} from './google-docs.js';
 import { getToolCatalog } from './tool-catalog.js';
 
 type PlatformBindingsValidationResult =
@@ -150,6 +156,15 @@ function normalizeToolNameListInput(raw: unknown): string[] | undefined {
     out.push(name);
   }
   return out;
+}
+
+function normalizeGoogleAuthProfileInput(raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim().toLowerCase();
+  if (!trimmed) return '';
+  const normalized = trimmed.replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '');
+  return normalized || '';
 }
 
 function mapChannelResponseSettingsInput(input: unknown): unknown {
@@ -942,10 +957,12 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
     toolMode?: string;
     toolsAllow?: string[];
     toolsDeny?: string[];
+    googleAuthProfile?: string;
     toolPolicy?: {
       mode?: string;
       allow?: string[];
       deny?: string[];
+      googleAuthProfile?: string;
     };
   } = {};
   try {
@@ -975,6 +992,9 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
   if (body.toolsDeny === undefined && body.toolPolicy?.deny !== undefined) {
     body.toolsDeny = body.toolPolicy.deny;
   }
+  if (body.googleAuthProfile === undefined && body.toolPolicy?.googleAuthProfile !== undefined) {
+    body.googleAuthProfile = body.toolPolicy.googleAuthProfile;
+  }
 
   const toolMode = normalizeToolModeInput(body.toolMode);
   if (body.toolMode !== undefined && toolMode === undefined) {
@@ -983,6 +1003,11 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
   }
   const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
   const toolsDeny = normalizeToolNameListInput(body.toolsDeny);
+  const googleAuthProfile = normalizeGoogleAuthProfileInput(body.googleAuthProfile);
+  if (body.googleAuthProfile !== undefined && googleAuthProfile === undefined) {
+    sendJson(ctx.res, 400, { error: 'googleAuthProfile must be a string' });
+    return;
+  }
 
   if (body.platformBindings !== undefined) {
     const parsed = await normalizeAndValidatePlatformBindingsInput(body.platformBindings, {
@@ -1030,6 +1055,7 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
     ...(toolMode !== undefined ? { toolMode } : {}),
     ...(toolsAllow !== undefined ? { toolsAllow } : {}),
     ...(toolsDeny !== undefined ? { toolsDeny } : {}),
+    ...(googleAuthProfile !== undefined ? { googleAuthProfile: googleAuthProfile || undefined } : {}),
   });
 
   void reconcileSlackRoutingForTalks(store.listTalks(), ctx.logger);
@@ -1089,6 +1115,7 @@ async function handleGetTalkTools(
     toolMode: talk.toolMode ?? 'auto',
     toolsAllow: talk.toolsAllow ?? [],
     toolsDeny: talk.toolsDeny ?? [],
+    googleAuthProfile: talk.googleAuthProfile,
     availableTools: allTools,
     enabledTools,
   });
@@ -1104,6 +1131,7 @@ async function handleUpdateTalkTools(
     toolMode?: string;
     toolsAllow?: string[];
     toolsDeny?: string[];
+    googleAuthProfile?: string;
   };
   try {
     body = (await readJsonBody(ctx.req)) as typeof body;
@@ -1125,11 +1153,17 @@ async function handleUpdateTalkTools(
   }
   const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
   const toolsDeny = normalizeToolNameListInput(body.toolsDeny);
+  const googleAuthProfile = normalizeGoogleAuthProfileInput(body.googleAuthProfile);
+  if (body.googleAuthProfile !== undefined && googleAuthProfile === undefined) {
+    sendJson(ctx.res, 400, { error: 'googleAuthProfile must be a string' });
+    return;
+  }
 
   const updated = store.updateTalk(talkId, {
     ...(toolMode !== undefined ? { toolMode } : {}),
     ...(toolsAllow !== undefined ? { toolsAllow } : {}),
     ...(toolsDeny !== undefined ? { toolsDeny } : {}),
+    ...(googleAuthProfile !== undefined ? { googleAuthProfile: googleAuthProfile || undefined } : {}),
   });
   if (!updated) {
     sendJson(ctx.res, 404, { error: 'Talk not found' });
@@ -1145,6 +1179,7 @@ async function handleUpdateTalkTools(
     toolMode: updated.toolMode ?? 'auto',
     toolsAllow: updated.toolsAllow ?? [],
     toolsDeny: updated.toolsDeny ?? [],
+    googleAuthProfile: updated.googleAuthProfile,
     availableTools: allTools,
     enabledTools,
   });
@@ -1166,10 +1201,12 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
     toolMode?: string;
     toolsAllow?: string[];
     toolsDeny?: string[];
+    googleAuthProfile?: string;
     toolPolicy?: {
       mode?: string;
       allow?: string[];
       deny?: string[];
+      googleAuthProfile?: string;
     };
   };
   try {
@@ -1206,6 +1243,9 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
   if (body.toolsDeny === undefined && body.toolPolicy?.deny !== undefined) {
     body.toolsDeny = body.toolPolicy.deny;
   }
+  if (body.googleAuthProfile === undefined && body.toolPolicy?.googleAuthProfile !== undefined) {
+    body.googleAuthProfile = body.toolPolicy.googleAuthProfile;
+  }
 
   const toolMode = normalizeToolModeInput(body.toolMode);
   if (body.toolMode !== undefined && toolMode === undefined) {
@@ -1214,6 +1254,11 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
   }
   const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
   const toolsDeny = normalizeToolNameListInput(body.toolsDeny);
+  const googleAuthProfile = normalizeGoogleAuthProfileInput(body.googleAuthProfile);
+  if (body.googleAuthProfile !== undefined && googleAuthProfile === undefined) {
+    sendJson(ctx.res, 400, { error: 'googleAuthProfile must be a string' });
+    return;
+  }
 
   if (body.platformBindings !== undefined) {
     const parsed = await normalizeAndValidatePlatformBindingsInput(body.platformBindings, {
@@ -1277,6 +1322,7 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
     toolMode,
     toolsAllow,
     toolsDeny,
+    ...(googleAuthProfile !== undefined ? { googleAuthProfile: googleAuthProfile || undefined } : {}),
   });
   if (!updated) {
     sendJson(ctx.res, 404, { error: 'Talk not found' });
@@ -1590,9 +1636,19 @@ export async function handleToolRoutes(ctx: HandlerContext, registry: ToolRegist
     let body:
       | {
           action?: 'google_auth_status';
+          profile?: string;
+        }
+      | {
+          action?: 'google_auth_profiles';
+        }
+      | {
+          action?: 'google_auth_use_profile';
+          profile?: string;
         }
       | {
           action?: 'google_auth_config';
+          profile?: string;
+          setActive?: boolean;
           refreshToken?: string;
           clientId?: string;
           clientSecret?: string;
@@ -1606,18 +1662,50 @@ export async function handleToolRoutes(ctx: HandlerContext, registry: ToolRegist
     }
 
     if (body.action === 'google_auth_status') {
-      const status = await googleDocsAuthStatus();
+      const statusReq = body as { profile?: string };
+      const profile = normalizeGoogleAuthProfileInput(statusReq.profile);
+      if (statusReq.profile !== undefined && profile === undefined) {
+        sendJson(res, 400, { error: 'profile must be a string' });
+        return;
+      }
+      const status = profile ? await googleDocsAuthStatusForProfile(profile) : await googleDocsAuthStatus();
       sendJson(res, 200, { status });
+      return;
+    }
+
+    if (body.action === 'google_auth_profiles') {
+      const profiles = await listGoogleDocsAuthProfiles();
+      sendJson(res, 200, { profiles });
+      return;
+    }
+
+    if (body.action === 'google_auth_use_profile') {
+      const payload = body as { profile?: string };
+      const profile = normalizeGoogleAuthProfileInput(payload.profile);
+      if (!profile) {
+        sendJson(res, 400, { error: 'profile is required' });
+        return;
+      }
+      const updated = await setGoogleDocsActiveProfile(profile);
+      const status = await googleDocsAuthStatusForProfile(profile);
+      sendJson(res, 200, { updated, status });
       return;
     }
 
     if (body.action === 'google_auth_config') {
       const payload = body as {
+        profile?: string;
+        setActive?: boolean;
         refreshToken?: string;
         clientId?: string;
         clientSecret?: string;
         tokenUri?: string;
       };
+      const profile = normalizeGoogleAuthProfileInput(payload.profile);
+      if (payload.profile !== undefined && !profile) {
+        sendJson(res, 400, { error: 'profile must be a non-empty string when provided' });
+        return;
+      }
       if (
         payload.refreshToken === undefined
         && payload.clientId === undefined
@@ -1628,12 +1716,14 @@ export async function handleToolRoutes(ctx: HandlerContext, registry: ToolRegist
         return;
       }
       const updated = await upsertGoogleDocsAuthConfig({
+        profile,
+        setActive: payload.setActive === true,
         refreshToken: payload.refreshToken,
         clientId: payload.clientId,
         clientSecret: payload.clientSecret,
         tokenUri: payload.tokenUri,
       });
-      const status = await googleDocsAuthStatus();
+      const status = await googleDocsAuthStatusForProfile(updated.profile);
       sendJson(res, 200, { updated, status });
       return;
     }

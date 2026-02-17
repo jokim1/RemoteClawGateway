@@ -76,6 +76,14 @@ function normalizeToolNames(input: unknown): string[] {
   return out;
 }
 
+function normalizeGoogleAuthProfile(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim().toLowerCase();
+  if (!trimmed) return undefined;
+  const normalized = trimmed.replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '');
+  return normalized || undefined;
+}
+
 function normalizeDirectives(input: unknown): Directive[] {
   if (!Array.isArray(input)) return [];
   const now = Date.now();
@@ -213,6 +221,7 @@ export class TalkStore {
           meta.toolMode = normalizeToolMode(meta.toolMode);
           meta.toolsAllow = normalizeToolNames(meta.toolsAllow);
           meta.toolsDeny = normalizeToolNames(meta.toolsDeny);
+          meta.googleAuthProfile = normalizeGoogleAuthProfile(meta.googleAuthProfile);
           if (meta.processing === undefined) {
             meta.processing = false;
           }
@@ -280,7 +289,7 @@ export class TalkStore {
     updates: Partial<
       Pick<
         TalkMeta,
-        'topicTitle' | 'objective' | 'model' | 'directives' | 'platformBindings' | 'platformBehaviors' | 'toolMode' | 'toolsAllow' | 'toolsDeny'
+        'topicTitle' | 'objective' | 'model' | 'directives' | 'platformBindings' | 'platformBehaviors' | 'toolMode' | 'toolsAllow' | 'toolsDeny' | 'googleAuthProfile'
       >
     >,
   ): TalkMeta | null {
@@ -309,6 +318,9 @@ export class TalkStore {
     }
     if (updates.toolsDeny !== undefined) {
       meta.toolsDeny = normalizeToolNames(updates.toolsDeny);
+    }
+    if (updates.googleAuthProfile !== undefined) {
+      meta.googleAuthProfile = normalizeGoogleAuthProfile(updates.googleAuthProfile);
     }
     meta.updatedAt = Date.now();
 

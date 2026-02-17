@@ -12,6 +12,7 @@ import type { ToolRegistry } from './tool-registry.js';
 import {
   googleDocsAppend,
   googleDocsAuthStatus,
+  googleDocsAuthStatusForProfile,
   googleDocsCreate,
   googleDriveListFiles,
   googleDriveMoveFile,
@@ -91,7 +92,7 @@ export class ToolExecutor {
           result = await this.execGoogleDocsRead(args);
           break;
         case 'google_docs_auth_status':
-          result = await this.execGoogleDocsAuthStatus();
+          result = await this.execGoogleDocsAuthStatus(args);
           break;
         case 'google_drive_files':
           result = await this.execGoogleDriveFiles(args);
@@ -298,12 +299,14 @@ export class ToolExecutor {
     }
     const content = args.content === undefined ? undefined : String(args.content);
     const folderId = args.folder_id === undefined ? undefined : String(args.folder_id).trim();
+    const profile = args.profile === undefined ? undefined : String(args.profile).trim();
 
     try {
       const created = await googleDocsCreate({
         title,
         content,
         folderId: folderId || undefined,
+        profile: profile || undefined,
       });
       return {
         success: true,
@@ -329,12 +332,13 @@ export class ToolExecutor {
   private async execGoogleDocsAppend(args: Record<string, unknown>): Promise<ToolExecResult> {
     const docId = String(args.doc_id ?? '').trim();
     const text = String(args.text ?? '');
+    const profile = args.profile === undefined ? undefined : String(args.profile).trim();
     if (!docId || !text.trim()) {
       return { success: false, content: 'Missing required fields: doc_id, text', durationMs: 0 };
     }
 
     try {
-      const appended = await googleDocsAppend({ docId, text });
+      const appended = await googleDocsAppend({ docId, text, profile: profile || undefined });
       return {
         success: true,
         content:
@@ -359,12 +363,13 @@ export class ToolExecutor {
   private async execGoogleDocsRead(args: Record<string, unknown>): Promise<ToolExecResult> {
     const docId = String(args.doc_id ?? '').trim();
     const maxChars = args.max_chars === undefined ? undefined : Number(args.max_chars);
+    const profile = args.profile === undefined ? undefined : String(args.profile).trim();
     if (!docId) {
       return { success: false, content: 'Missing required field: doc_id', durationMs: 0 };
     }
 
     try {
-      const read = await googleDocsRead({ docId, maxChars });
+      const read = await googleDocsRead({ docId, maxChars, profile: profile || undefined });
       return {
         success: true,
         content:
@@ -387,13 +392,16 @@ export class ToolExecutor {
     }
   }
 
-  private async execGoogleDocsAuthStatus(): Promise<ToolExecResult> {
+  private async execGoogleDocsAuthStatus(args?: Record<string, unknown>): Promise<ToolExecResult> {
+    const profile = args?.profile === undefined ? undefined : String(args.profile).trim();
     try {
-      const status = await googleDocsAuthStatus();
+      const status = profile ? await googleDocsAuthStatusForProfile(profile) : await googleDocsAuthStatus();
       return {
         success: status.accessTokenReady,
         content:
           `Google Docs auth status:\n` +
+          `Profile: ${status.profile}\n` +
+          `Active profile: ${status.activeProfile}\n` +
           `Token path: ${status.tokenPath}\n` +
           `hasClientId: ${status.hasClientId}\n` +
           `hasClientSecret: ${status.hasClientSecret}\n` +
@@ -413,6 +421,7 @@ export class ToolExecutor {
 
   private async execGoogleDriveFiles(args: Record<string, unknown>): Promise<ToolExecResult> {
     const action = String(args.action ?? '').trim().toLowerCase();
+    const profile = args.profile === undefined ? undefined : String(args.profile).trim();
     if (!action) {
       return { success: false, content: 'Missing required field: action', durationMs: 0 };
     }
@@ -423,6 +432,7 @@ export class ToolExecutor {
           folderId: args.folder_id === undefined ? undefined : String(args.folder_id),
           pageSize: args.page_size === undefined ? undefined : Number(args.page_size),
           pageToken: args.page_token === undefined ? undefined : String(args.page_token),
+          profile: profile || undefined,
         });
         const lines = listed.files.map((file) => {
           const type = file.mimeType?.includes('folder') ? 'folder' : 'file';
@@ -447,6 +457,7 @@ export class ToolExecutor {
           query,
           folderId: args.folder_id === undefined ? undefined : String(args.folder_id),
           pageSize: args.page_size === undefined ? undefined : Number(args.page_size),
+          profile: profile || undefined,
         });
         const lines = found.files.map((file) => {
           const type = file.mimeType?.includes('folder') ? 'folder' : 'file';
@@ -469,7 +480,7 @@ export class ToolExecutor {
             durationMs: 0,
           };
         }
-        const moved = await googleDriveMoveFile({ fileId, targetFolderId });
+        const moved = await googleDriveMoveFile({ fileId, targetFolderId, profile: profile || undefined });
         return {
           success: true,
           content:

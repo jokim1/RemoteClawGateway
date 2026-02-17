@@ -662,6 +662,7 @@ Provide a concise report of your findings or actions. Start with a one-line summ
       executor,
       logger,
       timeoutMs: opts.jobTimeoutMs ?? JOB_TIMEOUT_MS,
+      defaultGoogleAuthProfile: meta.googleAuthProfile,
     });
 
     const fullOutput = result.fullContent.trim();

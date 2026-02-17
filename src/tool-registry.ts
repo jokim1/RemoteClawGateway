@@ -127,6 +127,10 @@ const GOOGLE_DOCS_CREATE_TOOL: ToolDefinition = {
           type: 'string',
           description: 'Optional Google Drive folder ID to move the document into.',
         },
+        profile: {
+          type: 'string',
+          description: 'Optional Google auth profile name (defaults to active profile or talk default).',
+        },
       },
       required: ['title'],
     },
@@ -149,6 +153,10 @@ const GOOGLE_DOCS_APPEND_TOOL: ToolDefinition = {
         text: {
           type: 'string',
           description: 'Text to append at the end of the document.',
+        },
+        profile: {
+          type: 'string',
+          description: 'Optional Google auth profile name (defaults to active profile or talk default).',
         },
       },
       required: ['doc_id', 'text'],
@@ -173,6 +181,10 @@ const GOOGLE_DOCS_READ_TOOL: ToolDefinition = {
           type: 'number',
           description: 'Optional max characters to return (default 20000).',
         },
+        profile: {
+          type: 'string',
+          description: 'Optional Google auth profile name (defaults to active profile or talk default).',
+        },
       },
       required: ['doc_id'],
     },
@@ -187,7 +199,12 @@ const GOOGLE_DOCS_AUTH_STATUS_TOOL: ToolDefinition = {
       'Check Google Docs OAuth readiness for this gateway (token file/env presence + access token refresh test).',
     parameters: {
       type: 'object',
-      properties: {},
+      properties: {
+        profile: {
+          type: 'string',
+          description: 'Optional Google auth profile name to inspect.',
+        },
+      },
     },
   },
 };
@@ -257,6 +274,10 @@ const GOOGLE_DRIVE_FILES_TOOL: ToolDefinition = {
         target_folder_id: {
           type: 'string',
           description: 'Target folder ID (or URL) for action=move.',
+        },
+        profile: {
+          type: 'string',
+          description: 'Optional Google auth profile name (defaults to active profile or talk default).',
         },
       },
       required: ['action'],

@@ -256,6 +256,8 @@ export interface TalkMeta {
   toolsAllow?: string[];
   /** Optional deny-list of tool names for this talk. */
   toolsDeny?: string[];
+  /** Optional Google OAuth profile name for Google Docs/Drive tool calls in this talk. */
+  googleAuthProfile?: string;
   pinnedMessageIds: string[];
   jobs: TalkJob[];
   agents?: TalkAgent[];

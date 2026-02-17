@@ -11,9 +11,23 @@ type OAuthTokenFile = {
   expiry_date?: number;
 };
 
+type OAuthTokenStore = {
+  version?: number;
+  activeProfile?: string;
+  profiles?: Record<string, OAuthTokenFile>;
+};
+
 const DEFAULT_TOKEN_PATH = path.join(homedir(), '.openclaw', 'workspace', 'gdocs_token.json');
 const GOOGLE_DOCS_SCOPE = 'https://www.googleapis.com/auth/documents';
 const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
+const DEFAULT_PROFILE = 'default';
+
+function normalizeProfileName(raw: string | undefined): string {
+  const trimmed = (raw ?? '').trim().toLowerCase();
+  if (!trimmed) return DEFAULT_PROFILE;
+  const normalized = trimmed.replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '');
+  return normalized || DEFAULT_PROFILE;
+}
 
 function resolveTokenPath(): string {
   const fromEnv = process.env.GOOGLE_DOCS_TOKEN_PATH?.trim();
@@ -21,26 +35,83 @@ function resolveTokenPath(): string {
   return DEFAULT_TOKEN_PATH;
 }
 
-async function loadTokenRecord(): Promise<{ record: OAuthTokenFile; tokenPath: string }> {
+function isStoreShape(value: unknown): value is OAuthTokenStore {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && 'profiles' in (value as Record<string, unknown>));
+}
+
+function toStoreShape(raw: unknown): OAuthTokenStore {
+  if (isStoreShape(raw)) {
+    const store = raw as OAuthTokenStore;
+    const activeProfile = normalizeProfileName(store.activeProfile);
+    const profiles: Record<string, OAuthTokenFile> = {};
+    for (const [name, rec] of Object.entries(store.profiles ?? {})) {
+      if (!rec || typeof rec !== 'object') continue;
+      profiles[normalizeProfileName(name)] = rec as OAuthTokenFile;
+    }
+    if (!profiles[activeProfile]) {
+      profiles[activeProfile] = {};
+    }
+    return {
+      version: 2,
+      activeProfile,
+      profiles,
+    };
+  }
+
+  const legacy = (raw && typeof raw === 'object' ? raw as OAuthTokenFile : {});
+  return {
+    version: 2,
+    activeProfile: DEFAULT_PROFILE,
+    profiles: {
+      [DEFAULT_PROFILE]: legacy,
+    },
+  };
+}
+
+async function loadTokenStore(): Promise<{ store: OAuthTokenStore; tokenPath: string }> {
   const tokenPath = resolveTokenPath();
   const raw = await fsp.readFile(tokenPath, 'utf-8');
-  const record = JSON.parse(raw) as OAuthTokenFile;
-  return { record, tokenPath };
+  const parsed = JSON.parse(raw) as unknown;
+  return { store: toStoreShape(parsed), tokenPath };
 }
 
-async function saveTokenRecord(tokenPath: string, record: OAuthTokenFile): Promise<void> {
+async function saveTokenStore(tokenPath: string, store: OAuthTokenStore): Promise<void> {
   await fsp.mkdir(path.dirname(tokenPath), { recursive: true });
-  await fsp.writeFile(tokenPath, JSON.stringify(record, null, 2));
+  await fsp.writeFile(tokenPath, JSON.stringify(store, null, 2));
 }
 
-async function refreshAccessToken(record: OAuthTokenFile): Promise<{ accessToken: string; expiresIn?: number }> {
-  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID?.trim() || record.client_id?.trim();
-  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET?.trim() || record.client_secret?.trim();
-  const refreshToken = process.env.GOOGLE_OAUTH_REFRESH_TOKEN?.trim() || record.refresh_token?.trim();
-  const tokenUri =
-    process.env.GOOGLE_OAUTH_TOKEN_URI?.trim()
-    || record.token_uri?.trim()
-    || 'https://oauth2.googleapis.com/token';
+function resolveProfileRecord(
+  store: OAuthTokenStore,
+  profile: string | undefined,
+): { profile: string; record: OAuthTokenFile } {
+  const activeProfile = normalizeProfileName(store.activeProfile);
+  const selectedProfile = normalizeProfileName(profile) || activeProfile;
+  const profiles = store.profiles ?? {};
+  return {
+    profile: selectedProfile,
+    record: profiles[selectedProfile] ?? {},
+  };
+}
+
+function mergeEnvOAuthOverrides(profile: string, record: OAuthTokenFile): OAuthTokenFile {
+  // Keep env overrides only for default profile to preserve existing single-account behavior
+  // without unexpectedly hijacking explicitly-selected non-default profiles.
+  if (profile !== DEFAULT_PROFILE) return record;
+  return {
+    ...record,
+    ...(process.env.GOOGLE_OAUTH_CLIENT_ID?.trim() ? { client_id: process.env.GOOGLE_OAUTH_CLIENT_ID.trim() } : {}),
+    ...(process.env.GOOGLE_OAUTH_CLIENT_SECRET?.trim() ? { client_secret: process.env.GOOGLE_OAUTH_CLIENT_SECRET.trim() } : {}),
+    ...(process.env.GOOGLE_OAUTH_REFRESH_TOKEN?.trim() ? { refresh_token: process.env.GOOGLE_OAUTH_REFRESH_TOKEN.trim() } : {}),
+    ...(process.env.GOOGLE_OAUTH_TOKEN_URI?.trim() ? { token_uri: process.env.GOOGLE_OAUTH_TOKEN_URI.trim() } : {}),
+  };
+}
+
+async function refreshAccessToken(profile: string, record: OAuthTokenFile): Promise<{ accessToken: string; expiresIn?: number }> {
+  const auth = mergeEnvOAuthOverrides(profile, record);
+  const clientId = auth.client_id?.trim();
+  const clientSecret = auth.client_secret?.trim();
+  const refreshToken = auth.refresh_token?.trim();
+  const tokenUri = auth.token_uri?.trim() || 'https://oauth2.googleapis.com/token';
 
   if (!clientId || !clientSecret || !refreshToken) {
     throw new Error(
@@ -82,8 +153,14 @@ async function refreshAccessToken(record: OAuthTokenFile): Promise<{ accessToken
   return { accessToken: data.access_token, expiresIn: data.expires_in };
 }
 
-async function getAccessToken(): Promise<string> {
-  const { record, tokenPath } = await loadTokenRecord();
+async function getAccessToken(profile: string | undefined): Promise<string> {
+  const { store, tokenPath } = await loadTokenStore();
+  const selected = resolveProfileRecord(store, profile);
+  const mergedRecord = mergeEnvOAuthOverrides(selected.profile, selected.record);
+  const record = {
+    ...selected.record,
+    ...mergedRecord,
+  };
 
   const now = Date.now();
   const validAccessToken =
@@ -93,12 +170,23 @@ async function getAccessToken(): Promise<string> {
 
   if (validAccessToken) return record.access_token as string;
 
-  const refreshed = await refreshAccessToken(record);
-  record.access_token = refreshed.accessToken;
+  const refreshed = await refreshAccessToken(selected.profile, record);
+  const nextRecord: OAuthTokenFile = {
+    ...record,
+    access_token: refreshed.accessToken,
+  };
   if (typeof refreshed.expiresIn === 'number') {
-    record.expiry_date = now + refreshed.expiresIn * 1000;
+    nextRecord.expiry_date = now + refreshed.expiresIn * 1000;
   }
-  await saveTokenRecord(tokenPath, record);
+  const nextStore: OAuthTokenStore = {
+    version: 2,
+    activeProfile: normalizeProfileName(store.activeProfile),
+    profiles: {
+      ...(store.profiles ?? {}),
+      [selected.profile]: nextRecord,
+    },
+  };
+  await saveTokenStore(tokenPath, nextStore);
   return refreshed.accessToken;
 }
 
@@ -121,8 +209,8 @@ function parseDriveFileId(input: string): string {
   return (fromDocsUrl?.[1] ?? trimmed).trim();
 }
 
-async function googleFetchJson(url: string, init: RequestInit): Promise<any> {
-  const token = await getAccessToken();
+async function googleFetchJson(url: string, init: RequestInit, profile?: string): Promise<any> {
+  const token = await getAccessToken(profile);
   const headers = new Headers(init.headers ?? {});
   headers.set('Authorization', `Bearer ${token}`);
   if (!headers.has('Content-Type') && init.body) headers.set('Content-Type', 'application/json');
@@ -135,10 +223,11 @@ async function googleFetchJson(url: string, init: RequestInit): Promise<any> {
   return await res.json();
 }
 
-async function getDocumentEndIndex(docId: string): Promise<number> {
+async function getDocumentEndIndex(docId: string, profile?: string): Promise<number> {
   const doc = await googleFetchJson(
     `https://docs.googleapis.com/v1/documents/${encodeURIComponent(docId)}`,
     { method: 'GET' },
+    profile,
   );
   const content = Array.isArray(doc?.body?.content) ? doc.body.content : [];
   if (content.length === 0) return 1;
@@ -167,6 +256,7 @@ export async function googleDocsCreate(params: {
   title: string;
   content?: string;
   folderId?: string;
+  profile?: string;
 }): Promise<{ documentId: string; url: string; title: string }> {
   const title = params.title.trim();
   if (!title) throw new Error('title is required.');
@@ -174,14 +264,14 @@ export async function googleDocsCreate(params: {
   const created = await googleFetchJson('https://docs.googleapis.com/v1/documents', {
     method: 'POST',
     body: JSON.stringify({ title }),
-  });
+  }, params.profile);
 
   const documentId = String(created?.documentId ?? '');
   if (!documentId) throw new Error('Google Docs create returned no documentId.');
 
   const content = params.content?.trim();
   if (content) {
-    const index = await getDocumentEndIndex(documentId);
+    const index = await getDocumentEndIndex(documentId, params.profile);
     await googleFetchJson(
       `https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}:batchUpdate`,
       {
@@ -197,6 +287,7 @@ export async function googleDocsCreate(params: {
           ],
         }),
       },
+      params.profile,
     );
   }
 
@@ -205,6 +296,7 @@ export async function googleDocsCreate(params: {
     const meta = await googleFetchJson(
       `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(documentId)}?fields=parents`,
       { method: 'GET' },
+      params.profile,
     );
     const existingParents = Array.isArray(meta?.parents) ? meta.parents.filter((p: unknown): p is string => typeof p === 'string') : [];
     const removeParents = existingParents.join(',');
@@ -212,7 +304,7 @@ export async function googleDocsCreate(params: {
     moveUrl.searchParams.set('addParents', folderId);
     if (removeParents) moveUrl.searchParams.set('removeParents', removeParents);
     moveUrl.searchParams.set('fields', 'id,parents');
-    await googleFetchJson(moveUrl.toString(), { method: 'PATCH' });
+    await googleFetchJson(moveUrl.toString(), { method: 'PATCH' }, params.profile);
   }
 
   return {
@@ -225,12 +317,13 @@ export async function googleDocsCreate(params: {
 export async function googleDocsAppend(params: {
   docId: string;
   text: string;
+  profile?: string;
 }): Promise<{ documentId: string; appendedChars: number; url: string }> {
   const documentId = parseDocumentId(params.docId);
   const text = params.text ?? '';
   if (!text.trim()) throw new Error('text is required.');
 
-  const index = await getDocumentEndIndex(documentId);
+  const index = await getDocumentEndIndex(documentId, params.profile);
   await googleFetchJson(
     `https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}:batchUpdate`,
     {
@@ -246,6 +339,7 @@ export async function googleDocsAppend(params: {
         ],
       }),
     },
+    params.profile,
   );
 
   return {
@@ -258,6 +352,7 @@ export async function googleDocsAppend(params: {
 export async function googleDocsRead(params: {
   docId: string;
   maxChars?: number;
+  profile?: string;
 }): Promise<{ documentId: string; title: string; text: string; truncated: boolean; url: string }> {
   const documentId = parseDocumentId(params.docId);
   const maxChars = Math.max(500, Math.min(200_000, Number(params.maxChars) || 20_000));
@@ -265,6 +360,7 @@ export async function googleDocsRead(params: {
   const doc = await googleFetchJson(
     `https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}`,
     { method: 'GET' },
+    params.profile,
   );
 
   const title = String(doc?.title ?? 'Untitled');
@@ -282,6 +378,21 @@ export async function googleDocsRead(params: {
 }
 
 export async function googleDocsAuthStatus(): Promise<{
+  profile: string;
+  activeProfile: string;
+  tokenPath: string;
+  hasClientId: boolean;
+  hasClientSecret: boolean;
+  hasRefreshToken: boolean;
+  accessTokenReady: boolean;
+  error?: string;
+}> {
+  return googleDocsAuthStatusForProfile(undefined);
+}
+
+export async function googleDocsAuthStatusForProfile(profile: string | undefined): Promise<{
+  profile: string;
+  activeProfile: string;
   tokenPath: string;
   hasClientId: boolean;
   hasClientSecret: boolean;
@@ -290,13 +401,24 @@ export async function googleDocsAuthStatus(): Promise<{
   error?: string;
 }> {
   const tokenPath = resolveTokenPath();
+  let store: OAuthTokenStore = {
+    version: 2,
+    activeProfile: DEFAULT_PROFILE,
+    profiles: { [DEFAULT_PROFILE]: {} },
+  };
+  let selectedProfile = DEFAULT_PROFILE;
   let record: OAuthTokenFile = {};
 
   try {
-    const loaded = await loadTokenRecord();
-    record = loaded.record;
+    const loaded = await loadTokenStore();
+    store = loaded.store;
+    const selected = resolveProfileRecord(store, profile);
+    selectedProfile = selected.profile;
+    record = selected.record;
   } catch (err) {
     return {
+      profile: normalizeProfileName(profile),
+      activeProfile: normalizeProfileName(store.activeProfile),
       tokenPath,
       hasClientId: false,
       hasClientSecret: false,
@@ -306,13 +428,16 @@ export async function googleDocsAuthStatus(): Promise<{
     };
   }
 
-  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID?.trim() || record.client_id?.trim();
-  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET?.trim() || record.client_secret?.trim();
-  const refreshToken = process.env.GOOGLE_OAUTH_REFRESH_TOKEN?.trim() || record.refresh_token?.trim();
+  const auth = mergeEnvOAuthOverrides(selectedProfile, record);
+  const clientId = auth.client_id?.trim();
+  const clientSecret = auth.client_secret?.trim();
+  const refreshToken = auth.refresh_token?.trim();
 
   try {
-    await getAccessToken();
+    await getAccessToken(selectedProfile);
     return {
+      profile: selectedProfile,
+      activeProfile: normalizeProfileName(store.activeProfile),
       tokenPath,
       hasClientId: Boolean(clientId),
       hasClientSecret: Boolean(clientSecret),
@@ -321,6 +446,8 @@ export async function googleDocsAuthStatus(): Promise<{
     };
   } catch (err) {
     return {
+      profile: selectedProfile,
+      activeProfile: normalizeProfileName(store.activeProfile),
       tokenPath,
       hasClientId: Boolean(clientId),
       hasClientSecret: Boolean(clientSecret),
@@ -337,6 +464,7 @@ export async function googleDriveListFiles(params: {
   folderId?: string;
   pageSize?: number;
   pageToken?: string;
+  profile?: string;
 }): Promise<{
   files: Array<{
     id: string;
@@ -364,7 +492,7 @@ export async function googleDriveListFiles(params: {
     ? `'${folderId}' in parents and trashed=false`
     : 'trashed=false');
 
-  const data = await googleFetchJson(url.toString(), { method: 'GET' });
+  const data = await googleFetchJson(url.toString(), { method: 'GET' }, params.profile);
   const files = Array.isArray(data?.files) ? data.files : [];
   return {
     files: files.map((file: any) => ({
@@ -383,6 +511,7 @@ export async function googleDriveSearchFiles(params: {
   query: string;
   folderId?: string;
   pageSize?: number;
+  profile?: string;
 }): Promise<{
   files: Array<{
     id: string;
@@ -411,7 +540,7 @@ export async function googleDriveSearchFiles(params: {
   url.searchParams.set('orderBy', 'modifiedTime desc');
   url.searchParams.set('q', qParts.join(' and '));
 
-  const data = await googleFetchJson(url.toString(), { method: 'GET' });
+  const data = await googleFetchJson(url.toString(), { method: 'GET' }, params.profile);
   const files = Array.isArray(data?.files) ? data.files : [];
   return {
     files: files.map((file: any) => ({
@@ -428,6 +557,7 @@ export async function googleDriveSearchFiles(params: {
 export async function googleDriveMoveFile(params: {
   fileId: string;
   targetFolderId: string;
+  profile?: string;
 }): Promise<{
   id: string;
   name: string;
@@ -440,6 +570,7 @@ export async function googleDriveMoveFile(params: {
   const current = await googleFetchJson(
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,parents`,
     { method: 'GET' },
+    params.profile,
   );
   const existingParents = Array.isArray(current?.parents)
     ? current.parents.filter((p: unknown): p is string => typeof p === 'string')
@@ -452,7 +583,7 @@ export async function googleDriveMoveFile(params: {
   }
   moveUrl.searchParams.set('fields', 'id,name,webViewLink,parents');
 
-  const moved = await googleFetchJson(moveUrl.toString(), { method: 'PATCH' });
+  const moved = await googleFetchJson(moveUrl.toString(), { method: 'PATCH' }, params.profile);
   return {
     id: String(moved?.id ?? fileId),
     name: String(moved?.name ?? ''),
@@ -462,6 +593,8 @@ export async function googleDriveMoveFile(params: {
 }
 
 export interface GoogleDocsAuthConfigInput {
+  profile?: string;
+  setActive?: boolean;
   refreshToken?: string;
   clientId?: string;
   clientSecret?: string;
@@ -469,6 +602,8 @@ export interface GoogleDocsAuthConfigInput {
 }
 
 export interface GoogleDocsAuthConfigResult {
+  profile: string;
+  activeProfile: string;
   tokenPath: string;
   hasClientId: boolean;
   hasClientSecret: boolean;
@@ -479,13 +614,25 @@ export async function upsertGoogleDocsAuthConfig(
   updates: GoogleDocsAuthConfigInput,
 ): Promise<GoogleDocsAuthConfigResult> {
   const tokenPath = resolveTokenPath();
-  let record: OAuthTokenFile = {};
+  let store: OAuthTokenStore = {
+    version: 2,
+    activeProfile: DEFAULT_PROFILE,
+    profiles: { [DEFAULT_PROFILE]: {} },
+  };
   try {
-    const loaded = await loadTokenRecord();
-    record = loaded.record;
+    const loaded = await loadTokenStore();
+    store = loaded.store;
   } catch {
-    record = {};
+    // start with a fresh store
   }
+  const profile = normalizeProfileName(updates.profile);
+  const nextStore: OAuthTokenStore = {
+    version: 2,
+    activeProfile: normalizeProfileName(store.activeProfile),
+    profiles: { ...(store.profiles ?? {}) },
+  };
+  const profiles = nextStore.profiles ?? {};
+  const record: OAuthTokenFile = { ...(profiles[profile] ?? {}) };
 
   const refreshToken = updates.refreshToken?.trim();
   const clientId = updates.clientId?.trim();
@@ -508,11 +655,80 @@ export async function upsertGoogleDocsAuthConfig(
     delete record.expiry_date;
   }
 
-  await saveTokenRecord(tokenPath, record);
+  profiles[profile] = record;
+  nextStore.profiles = profiles;
+  if (updates.setActive === true || (!nextStore.activeProfile || !profiles[nextStore.activeProfile])) {
+    nextStore.activeProfile = profile;
+  }
+
+  await saveTokenStore(tokenPath, nextStore);
+  const effectiveRecord = mergeEnvOAuthOverrides(profile, record);
   return {
+    profile,
+    activeProfile: normalizeProfileName(nextStore.activeProfile),
     tokenPath,
-    hasClientId: Boolean((process.env.GOOGLE_OAUTH_CLIENT_ID?.trim() || record.client_id?.trim())),
-    hasClientSecret: Boolean((process.env.GOOGLE_OAUTH_CLIENT_SECRET?.trim() || record.client_secret?.trim())),
-    hasRefreshToken: Boolean((process.env.GOOGLE_OAUTH_REFRESH_TOKEN?.trim() || record.refresh_token?.trim())),
+    hasClientId: Boolean(effectiveRecord.client_id?.trim()),
+    hasClientSecret: Boolean(effectiveRecord.client_secret?.trim()),
+    hasRefreshToken: Boolean(effectiveRecord.refresh_token?.trim()),
   };
+}
+
+export async function listGoogleDocsAuthProfiles(): Promise<{
+  tokenPath: string;
+  activeProfile: string;
+  profiles: Array<{ name: string; hasClientId: boolean; hasClientSecret: boolean; hasRefreshToken: boolean }>;
+}> {
+  const tokenPath = resolveTokenPath();
+  let store: OAuthTokenStore = {
+    version: 2,
+    activeProfile: DEFAULT_PROFILE,
+    profiles: { [DEFAULT_PROFILE]: {} },
+  };
+  try {
+    const loaded = await loadTokenStore();
+    store = loaded.store;
+  } catch {
+    // keep default empty store
+  }
+  const activeProfile = normalizeProfileName(store.activeProfile);
+  const names = new Set<string>(Object.keys(store.profiles ?? {}));
+  names.add(activeProfile);
+  const profiles = Array.from(names)
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => {
+      const record = mergeEnvOAuthOverrides(name, (store.profiles ?? {})[name] ?? {});
+      return {
+        name,
+        hasClientId: Boolean(record.client_id?.trim()),
+        hasClientSecret: Boolean(record.client_secret?.trim()),
+        hasRefreshToken: Boolean(record.refresh_token?.trim()),
+      };
+    });
+  return { tokenPath, activeProfile, profiles };
+}
+
+export async function setGoogleDocsActiveProfile(profile: string): Promise<{ tokenPath: string; activeProfile: string }> {
+  const normalized = normalizeProfileName(profile);
+  const tokenPath = resolveTokenPath();
+  let store: OAuthTokenStore = {
+    version: 2,
+    activeProfile: DEFAULT_PROFILE,
+    profiles: { [DEFAULT_PROFILE]: {} },
+  };
+  try {
+    const loaded = await loadTokenStore();
+    store = loaded.store;
+  } catch {
+    // keep default empty store
+  }
+  const nextStore: OAuthTokenStore = {
+    version: 2,
+    activeProfile: normalized,
+    profiles: {
+      ...(store.profiles ?? {}),
+      [normalized]: (store.profiles ?? {})[normalized] ?? {},
+    },
+  };
+  await saveTokenStore(tokenPath, nextStore);
+  return { tokenPath, activeProfile: normalized };
 }
