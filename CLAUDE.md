@@ -101,6 +101,19 @@ npm test         # run tests
 
 Requires Node 20+. Voice features require at minimum `OPENAI_API_KEY`.
 
+## Execution Modes
+
+Each Talk has an `executionMode` that controls how chat requests are routed through OpenClaw:
+
+- **`openclaw`** (default) — Session key uses `agent:<agentId>:` prefix, which activates OpenClaw's embedded agent. OpenClaw replaces the gateway's tools array with its own (Read, Write, exec). The `x-openclaw-agent-id` header is sent. Gateway-installed tools are not callable.
+- **`full_control`** — Session key uses `talk:clawtalk:talk:<id>:chat` prefix (no `agent:` prefix), bypassing OpenClaw's agent. The gateway acts as a transparent LLM proxy. Gateway-installed tools (google_docs_append, etc.) are callable. The `x-openclaw-agent-id` header is suppressed; model routing uses the `model` param instead.
+
+Session key construction lives in `talk-chat.ts`: `buildTalkSessionKey()` for openclaw, `buildFullControlTalkSessionKey()` for full_control.
+
+Job scheduler always uses `job:` prefix session keys (`buildTalkJobSessionKey()`) regardless of execution mode — jobs run in transparent proxy mode.
+
+Old values (`inherit`, `sandboxed`, `unsandboxed`) are lazily migrated on load in `talk-store.ts` and accepted from stale clients in `talks.ts`.
+
 ## Key Patterns
 
 - Plugin registers via `api.registerHttpHandler()` returning `boolean` (true = handled)
