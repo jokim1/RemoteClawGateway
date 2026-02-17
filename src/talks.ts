@@ -791,9 +791,10 @@ export async function handleTalks(ctx: HandlerContext, store: TalkStore, registr
     return;
   }
 
-  // GET /api/talks/:id/messages
+  // GET/DELETE /api/talks/:id/messages
   const messagesMatch = pathname.match(/^\/api\/talks\/([\w-]+)\/messages$/);
   if (messagesMatch) {
+    if (req.method === 'DELETE') return handleDeleteMessages(ctx, store, messagesMatch[1]);
     if (req.method !== 'GET') {
       sendJson(res, 405, { error: 'Method not allowed' });
       return;
@@ -1271,6 +1272,30 @@ async function handleGetMessages(ctx: HandlerContext, store: TalkStore, talkId: 
   messages = messages.slice(-limit);
 
   sendJson(ctx.res, 200, { messages });
+}
+
+async function handleDeleteMessages(ctx: HandlerContext, store: TalkStore, talkId: string): Promise<void> {
+  const talk = store.getTalk(talkId);
+  if (!talk) {
+    sendJson(ctx.res, 404, { error: 'Talk not found' });
+    return;
+  }
+
+  let body: { messageIds?: string[] };
+  try {
+    body = (await readJsonBody(ctx.req)) as typeof body;
+  } catch {
+    sendJson(ctx.res, 400, { error: 'Invalid JSON body' });
+    return;
+  }
+
+  if (!Array.isArray(body.messageIds) || body.messageIds.length === 0) {
+    sendJson(ctx.res, 400, { error: 'messageIds must be a non-empty array' });
+    return;
+  }
+
+  const result = await store.deleteMessages(talkId, body.messageIds);
+  sendJson(ctx.res, 200, result);
 }
 
 async function handleAddPin(ctx: HandlerContext, store: TalkStore, talkId: string, msgId: string): Promise<void> {

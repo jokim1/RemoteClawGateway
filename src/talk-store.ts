@@ -500,6 +500,46 @@ export class TalkStore {
     return null;
   }
 
+  /**
+   * Delete messages by ID from a Talk's history.
+   * Rewrites history.jsonl with surviving messages and cleans dangling pins.
+   */
+  async deleteMessages(talkId: string, messageIds: string[]): Promise<{ deleted: number; remaining: number }> {
+    if (!isValidId(talkId)) return { deleted: 0, remaining: 0 };
+    if (!Array.isArray(messageIds) || messageIds.length === 0) {
+      const existing = await this.getMessages(talkId);
+      return { deleted: 0, remaining: existing.length };
+    }
+
+    const idSet = new Set(messageIds.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim()));
+    if (idSet.size === 0) {
+      const existing = await this.getMessages(talkId);
+      return { deleted: 0, remaining: existing.length };
+    }
+
+    const history = await this.getMessages(talkId);
+    const remainingMessages = history.filter((msg) => !idSet.has(msg.id));
+    const deleted = history.length - remainingMessages.length;
+    const dir = path.join(this.talksDir, talkId);
+    await fsp.mkdir(dir, { recursive: true });
+    const historyPath = path.join(dir, 'history.jsonl');
+    const content = remainingMessages.map((m) => JSON.stringify(m)).join('\n');
+    await fsp.writeFile(historyPath, content ? `${content}\n` : '', 'utf-8');
+
+    const meta = this.talks.get(talkId);
+    if (meta) {
+      const beforePins = meta.pinnedMessageIds.length;
+      meta.pinnedMessageIds = meta.pinnedMessageIds.filter((id) => !idSet.has(id));
+      if (deleted > 0 || meta.pinnedMessageIds.length !== beforePins) {
+        meta.updatedAt = Date.now();
+        this.invalidateListCache();
+        this.persistMeta(meta);
+      }
+    }
+
+    return { deleted, remaining: remainingMessages.length };
+  }
+
   // -------------------------------------------------------------------------
   // Pin management
   // -------------------------------------------------------------------------
