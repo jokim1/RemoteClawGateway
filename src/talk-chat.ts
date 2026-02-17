@@ -556,6 +556,9 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   const tools = disableTools
     ? []
     : registry.getToolSchemas().filter((tool) => enabledToolNames.has(tool.function.name.toLowerCase()));
+  logger.info(
+    `TalkChat: tool availability talkId=${talkId} enabled=${!disableTools} count=${tools.length} names=${tools.map((t) => t.function.name).join(',') || '-'}`,
+  );
   const maxIterations = disableTools ? 2 : undefined;
   if (disableTools) {
     const reason = isModelQuestion
@@ -582,11 +585,7 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     headerAgentId: routing.headerAgentId,
   });
   const resolvedHeaderAgentId = routing.headerAgentId
-    ?? (
-      routeDiag.configuredAgentModel?.trim().toLowerCase() !== model.trim().toLowerCase()
-        ? routeDiag.matchedRequestedModelAgentId
-        : undefined
-    );
+    ?? inboundAgentId;
   // Keep `agent:<id>` stable and real so OpenClaw resolves workspace/identity correctly.
   // Use a separate lane suffix for per-run isolation.
   const resolvedSessionAgentId =
