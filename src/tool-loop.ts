@@ -16,6 +16,7 @@ import { Agent } from 'undici';
 import type { Logger, ToolCallInfo } from './types.js';
 import type { ToolRegistry, ToolDefinition } from './tool-registry.js';
 import type { ToolExecutor, ToolExecResult } from './tool-executor.js';
+import { extractGoogleDocsDocumentIdFromUrl } from './google-docs-url.js';
 
 /** Dispatcher with disabled headers/body timeout for long-running non-streaming requests.
  *  Node.js undici defaults to 5 min headersTimeout which kills requests before our
@@ -117,6 +118,35 @@ function withDefaultGoogleProfile(
     // keep original args if JSON parse fails; executor will surface the error
   }
   return argsJson;
+}
+
+function routeToolCallForExecution(
+  toolName: string,
+  argsJson: string,
+  defaultGoogleAuthProfile: string | undefined,
+): { executeName: string; executeArgsJson: string } {
+  let executeName = toolName;
+  let executeArgsJson = argsJson;
+
+  if (toolName.trim().toLowerCase() === 'web_fetch_extract') {
+    try {
+      const parsed = JSON.parse(argsJson) as Record<string, unknown>;
+      const url = typeof parsed?.url === 'string' ? parsed.url : '';
+      const docId = extractGoogleDocsDocumentIdFromUrl(url);
+      if (docId) {
+        const routedArgs: Record<string, unknown> = { doc_id: docId };
+        if (parsed.max_chars !== undefined) routedArgs.max_chars = parsed.max_chars;
+        if (typeof parsed.profile === 'string' && parsed.profile.trim()) routedArgs.profile = parsed.profile.trim();
+        executeName = 'google_docs_read';
+        executeArgsJson = JSON.stringify(routedArgs);
+      }
+    } catch {
+      // keep original args; executor will report JSON errors as needed
+    }
+  }
+
+  executeArgsJson = withDefaultGoogleProfile(executeName, executeArgsJson, defaultGoogleAuthProfile);
+  return { executeName, executeArgsJson };
 }
 
 /** Accumulated tool call fragment from streaming delta. */
@@ -432,15 +462,18 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
           })}\n\n`);
           abort.touch();
 
-          const result = await executor.execute(
+          const routed = routeToolCallForExecution(
             tc.function.name,
-            withDefaultGoogleProfile(tc.function.name, tc.function.arguments, opts.defaultGoogleAuthProfile),
+            tc.function.arguments,
+            opts.defaultGoogleAuthProfile,
           );
+          const result = await executor.execute(routed.executeName, routed.executeArgsJson);
 
           // Send tool_end event to client
           res.write(`event: tool_end\ndata: ${JSON.stringify({
             id: tc.id,
             name: tc.function.name,
+            executeName: routed.executeName,
             success: result.success,
             content: result.content.slice(0, 2000), // Truncate for SSE event
             durationMs: result.durationMs,
@@ -596,10 +629,12 @@ export async function runToolLoopNonStreaming(opts: ToolLoopNonStreamOptions): P
 
       // Execute each tool
       for (const tc of toolCalls) {
-        const result = await executor.execute(
+        const routed = routeToolCallForExecution(
           tc.function.name,
-          withDefaultGoogleProfile(tc.function.name, tc.function.arguments, opts.defaultGoogleAuthProfile),
+          tc.function.arguments,
+          opts.defaultGoogleAuthProfile,
         );
+        const result = await executor.execute(routed.executeName, routed.executeArgsJson);
         messages.push({
           role: 'tool',
           content: result.content,

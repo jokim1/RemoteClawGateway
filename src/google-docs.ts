@@ -2,6 +2,7 @@ import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { extractGoogleDocsDocumentIdFromUrl } from './google-docs-url.js';
 
 type OAuthTokenFile = {
   client_id?: string;
@@ -251,8 +252,8 @@ async function getAccessToken(profile: string | undefined): Promise<string> {
 function parseDocumentId(input: string): string {
   const trimmed = input.trim();
   if (!trimmed) throw new Error('Document ID is required.');
-  const fromUrl = trimmed.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
-  return (fromUrl?.[1] ?? trimmed).trim();
+  const fromUrl = extractGoogleDocsDocumentIdFromUrl(trimmed);
+  return (fromUrl ?? trimmed).trim();
 }
 
 function parseDriveFileId(input: string): string {

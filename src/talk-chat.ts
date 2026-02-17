@@ -20,6 +20,7 @@ import { runToolLoop } from './tool-loop.js';
 import { collectRoutingDiagnostics } from './model-routing-diagnostics.js';
 import { getToolCatalog } from './tool-catalog.js';
 import { parseEventTrigger, validateSchedule } from './job-scheduler.js';
+import { hasGoogleDocsDocumentUrl } from './google-docs-url.js';
 
 /** Maximum number of history messages to include in LLM context. */
 const MAX_CONTEXT_MESSAGES = 50;
@@ -117,18 +118,31 @@ function extractDriveListLimit(message: string): number {
 }
 
 function prioritizeTurnToolInfos(tools: ToolInfo[], message: string): ToolInfo[] {
-  if (!isGoogleDriveIntent(message)) return tools;
-  const hasDriveTool = tools.some((tool) => tool.name.trim().toLowerCase() === 'google_drive_files');
-  if (!hasDriveTool) return tools;
-  const blockedForDriveIntent = new Set([
-    'exec',
-    'shell_exec',
-    'manage_tools',
-    'read',
-    'write',
-    'edit',
-  ]);
-  return tools.filter((tool) => !blockedForDriveIntent.has(tool.name.trim().toLowerCase()));
+  let filtered = tools;
+
+  if (isGoogleDriveIntent(message)) {
+    const hasDriveTool = filtered.some((tool) => tool.name.trim().toLowerCase() === 'google_drive_files');
+    if (hasDriveTool) {
+      const blockedForDriveIntent = new Set([
+        'exec',
+        'shell_exec',
+        'manage_tools',
+        'read',
+        'write',
+        'edit',
+      ]);
+      filtered = filtered.filter((tool) => !blockedForDriveIntent.has(tool.name.trim().toLowerCase()));
+    }
+  }
+
+  if (hasGoogleDocsDocumentUrl(message)) {
+    const hasDocsReadTool = filtered.some((tool) => tool.name.trim().toLowerCase() === 'google_docs_read');
+    if (hasDocsReadTool) {
+      filtered = filtered.filter((tool) => tool.name.trim().toLowerCase() !== 'web_fetch_extract');
+    }
+  }
+
+  return filtered;
 }
 
 function filterToolInfos(

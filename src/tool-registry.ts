@@ -215,7 +215,7 @@ const WEB_FETCH_EXTRACT_TOOL: ToolDefinition = {
     name: 'web_fetch_extract',
     description:
       'Fetch a URL and return cleaned text content for summarization/research. ' +
-      'Supports HTML, plain text, and JSON responses.',
+      'Supports HTML, plain text, and JSON responses. For Google Docs URLs, use google_docs_read.',
     parameters: {
       type: 'object',
       properties: {

@@ -20,6 +20,7 @@ import {
   googleDocsRead,
   GOOGLE_DOCS_REQUIRED_SCOPES,
 } from './google-docs.js';
+import { extractGoogleDocsDocumentIdFromUrl } from './google-docs-url.js';
 
 /** Maximum output size per tool execution (512KB). */
 const MAX_OUTPUT_BYTES = 512 * 1024;
@@ -535,6 +536,39 @@ export class ToolExecutor {
 
     const maxChars = Math.min(50_000, Math.max(500, Number(args.max_chars) || 12_000));
     const timeoutS = Math.min(60, Math.max(1, Number(args.timeout) || 15));
+    const profile = args.profile === undefined ? undefined : String(args.profile).trim();
+    const googleDocId = extractGoogleDocsDocumentIdFromUrl(urlRaw);
+
+    if (googleDocId) {
+      try {
+        const read = await googleDocsRead({
+          docId: googleDocId,
+          maxChars,
+          profile: profile || undefined,
+        });
+        return {
+          success: true,
+          content:
+            `Auto-routed from web_fetch_extract to google_docs_read for authenticated Google Docs access.\n` +
+            `Google Doc: ${read.title}\n` +
+            `Document ID: ${read.documentId}\n` +
+            `URL: ${read.url}\n` +
+            `Truncated: ${read.truncated ? 'yes' : 'no'}\n\n` +
+            read.text,
+          durationMs: 0,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          success: false,
+          content:
+            `Google Docs URL detected. web_fetch_extract cannot reliably access Google Docs due to auth/cookie walls.\n` +
+            `Attempted authenticated fallback via google_docs_read and failed: ${msg}\n` +
+            `Required OAuth scopes: ${GOOGLE_DOCS_REQUIRED_SCOPES.join(', ')}`,
+          durationMs: 0,
+        };
+      }
+    }
 
     try {
       const res = await fetch(parsed, {
