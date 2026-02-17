@@ -20,7 +20,7 @@ import { runToolLoop } from './tool-loop.js';
 import { collectRoutingDiagnostics } from './model-routing-diagnostics.js';
 import { getToolCatalog } from './tool-catalog.js';
 import { parseEventTrigger, validateSchedule } from './job-scheduler.js';
-import { hasGoogleDocsDocumentUrl } from './google-docs-url.js';
+import { extractGoogleDocsDocumentIdFromUrl, hasGoogleDocsDocumentUrl } from './google-docs-url.js';
 
 /** Maximum number of history messages to include in LLM context. */
 const MAX_CONTEXT_MESSAGES = 50;
@@ -354,6 +354,9 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   const hasGoogleDriveTool = availableToolInfos.some(
     (tool) => tool.name.trim().toLowerCase() === 'google_drive_files',
   );
+  const hasGoogleDocsReadTool = availableToolInfos.some(
+    (tool) => tool.name.trim().toLowerCase() === 'google_docs_read',
+  );
 
   // Deterministic Drive listing fast path:
   // bypass model/tool-chaining for common "recent drive files" requests.
@@ -368,6 +371,63 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     const directReply = driveResult.success
       ? driveResult.content
       : `Google Drive request failed: ${driveResult.content}`;
+
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.write(`event: meta\ndata: ${JSON.stringify({ userMessageId })}\n\n`);
+    res.write(`data: ${JSON.stringify({
+      choices: [{ delta: { content: directReply } }],
+      model,
+    })}\n\n`);
+    await store.appendMessage(talkId, {
+      id: userMessageId,
+      role: 'user',
+      content: body.message,
+      timestamp: Date.now(),
+      ...(body.agentName && { agentName: body.agentName }),
+      ...(body.agentRole && { agentRole: body.agentRole as any }),
+    });
+    await store.appendMessage(talkId, {
+      id: randomUUID(),
+      role: 'assistant',
+      content: directReply,
+      timestamp: Date.now(),
+      model,
+      ...(body.agentName && { agentName: body.agentName }),
+      ...(body.agentRole && { agentRole: body.agentRole as any }),
+    });
+    scheduleContextUpdate({
+      talkId,
+      userMessage: body.message,
+      assistantResponse: directReply,
+      model,
+      gatewayOrigin,
+      authToken,
+      store,
+      logger,
+    });
+    if (!res.writableEnded) {
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }
+    return;
+  }
+
+  // Deterministic Google Docs read fast path:
+  // bypass model/tool-chaining when the user directly provides a Google Docs URL.
+  const googleDocId = extractGoogleDocsDocumentIdFromUrl(body.message);
+  if (!isModelQuestion && googleDocId && hasGoogleDocsReadTool) {
+    const userMessageId = randomUUID();
+    const docsResult = await executor.execute('google_docs_read', JSON.stringify({
+      doc_id: googleDocId,
+      ...(meta.googleAuthProfile ? { profile: meta.googleAuthProfile } : {}),
+    }));
+    const directReply = docsResult.success
+      ? docsResult.content
+      : `Google Docs request failed: ${docsResult.content}`;
 
     res.statusCode = 200;
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
