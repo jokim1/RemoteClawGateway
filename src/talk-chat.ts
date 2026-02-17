@@ -416,10 +416,6 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   let toolCallMessages: Array<any> = [];
   const routing = resolveTalkAgentRouting(meta, body.agentName);
   const traceId = randomUUID();
-  const extraHeaders: Record<string, string> = {
-    'x-openclaw-session-key': buildTalkSessionKey(talkId, routing.sessionAgentPart),
-    'x-openclaw-trace-id': traceId,
-  };
   const routeDiag = await collectRoutingDiagnostics({
     requestedModel: model,
     headerAgentId: routing.headerAgentId,
@@ -430,11 +426,24 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
         ? routeDiag.matchedRequestedModelAgentId
         : undefined
     );
+  // Route-isolated session key:
+  // Bind the OpenClaw session lane to the resolved agent route (or model fallback),
+  // so turns don't accidentally reuse a stale lane that points at a different model.
+  const sessionRoutePart =
+    resolvedHeaderAgentId?.trim()
+    || routeDiag.matchedRequestedModelAgentId?.trim()
+    || routing.sessionAgentPart
+    || `model_${sanitizeSessionPart(model)}`;
+  const extraHeaders: Record<string, string> = {
+    'x-openclaw-session-key': buildTalkSessionKey(talkId, sessionRoutePart),
+    'x-openclaw-trace-id': traceId,
+  };
   if (resolvedHeaderAgentId?.trim()) {
     extraHeaders['x-openclaw-agent-id'] = resolvedHeaderAgentId.trim();
   }
   logger.info(
     `ModelRoute trace=${traceId} flow=talk-chat talkId=${talkId} requestedModel=${routeDiag.requestedModel} `
+    + `sessionRoutePart=${sessionRoutePart} sessionKey=${extraHeaders['x-openclaw-session-key']} `
     + `headerAgentId=${routing.headerAgentId ?? '-'} effectiveHeaderAgentId=${resolvedHeaderAgentId ?? '-'} `
     + `configuredAgentId=${routeDiag.configuredAgentId ?? '-'} `
     + `configuredAgentModel=${routeDiag.configuredAgentModel ?? '-'} defaultAgentId=${routeDiag.defaultAgentId ?? '-'} `

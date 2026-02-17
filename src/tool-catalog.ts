@@ -26,6 +26,13 @@ type CatalogPersistedState = {
   installedIds: string[];
 };
 
+const DEFAULT_DATA_DIR = join(
+  process.env.HOME || '~',
+  '.openclaw',
+  'plugins',
+  'clawtalk',
+);
+
 const CATALOG_DEFINITIONS: CatalogToolDefinition[] = [
   {
     id: 'google_docs',
@@ -119,10 +126,9 @@ export class ToolCatalog {
 
   constructor(dataDir: string | undefined, logger: Logger) {
     this.logger = logger;
-    if (dataDir) {
-      mkdirSync(dataDir, { recursive: true });
-      this.persistPath = join(dataDir, 'tool-catalog.json');
-    }
+    const resolvedDataDir = dataDir || DEFAULT_DATA_DIR;
+    mkdirSync(resolvedDataDir, { recursive: true });
+    this.persistPath = join(resolvedDataDir, 'tool-catalog.json');
     for (const entry of CATALOG_DEFINITIONS) {
       for (const toolName of entry.toolNames) {
         this.managedToolToCatalogId.set(toolName.toLowerCase(), entry.id);
@@ -237,7 +243,7 @@ export class ToolCatalog {
 const catalogSingletons = new Map<string, ToolCatalog>();
 
 export function getToolCatalog(dataDir: string | undefined, logger: Logger): ToolCatalog {
-  const key = dataDir ?? '__memory__';
+  const key = dataDir || DEFAULT_DATA_DIR;
   const existing = catalogSingletons.get(key);
   if (existing) return existing;
   const created = new ToolCatalog(dataDir, logger);
