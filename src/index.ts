@@ -603,8 +603,7 @@ const plugin = {
     api.on('gateway_start', () => {
       refreshSlackIngressRoute();
       logSlackOwnershipConflicts();
-      // Avoid duplicate config writes/reload churn: reconciliation already runs during register.
-      void reconcileSlackRoutingForTalks(talkStore.listTalks(), api.logger);
+      // Avoid duplicate config writes/reload churn: reconciliation runs after TalkStore init.
       api.logger.info('ClawTalk: gateway_start event received');
     });
 
