@@ -55,16 +55,27 @@ function sanitizeSessionPart(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_').slice(0, 96);
 }
 
-function buildTalkJobSessionKey(talkId: string, jobId: string, agentId: string): string {
+// Session keys for job scheduler use a `job:` prefix instead of `agent:`.
+// When a session key starts with `agent:<id>:`, OpenClaw resolves it as
+// an embedded-agent session, replacing the gateway's `tools` array with
+// the agent's own tool set (Read/Write/exec/…).  That makes gateway tools
+// like google_docs_append unreachable — they only appear in the system
+// prompt description, not in the callable function set.
+//
+// Using `job:` keeps the request in transparent LLM-proxy mode so the
+// gateway's tool array is forwarded to the model and executed via
+// ToolExecutor on the gateway side.
+
+function buildTalkJobSessionKey(talkId: string, jobId: string): string {
   const talk = sanitizeSessionPart(talkId) || 'talk';
   const job = sanitizeSessionPart(jobId) || 'job';
-  const agent = sanitizeSessionPart(agentId) || CLAWTALK_DEFAULT_AGENT_ID;
-  return `agent:${agent}:clawtalk:talk:${talk}:job:${job}`;
+  return `job:clawtalk:talk:${talk}:job:${job}`;
 }
 
-function buildUnsandboxedTalkSessionKey(talkId: string): string {
+function buildUnsandboxedTalkJobSessionKey(talkId: string, jobId: string): string {
   const talk = sanitizeSessionPart(talkId) || 'talk';
-  return `agent:${CLAWTALK_DEFAULT_AGENT_ID}:clawtalk:talk:${talk}:main`;
+  const job = sanitizeSessionPart(jobId) || 'job';
+  return `job:clawtalk:talk:${talk}:unsandboxed:${job}`;
 }
 
 function filterToolInfos(
@@ -778,18 +789,12 @@ Provide a concise report of your findings or actions. Start with a one-line summ
     const model = meta.model ?? 'openclaw';
     const traceId = randomUUID();
     const talkExecutionMode = meta.executionMode ?? 'inherit';
+    // Use `job:` prefixed session keys (see buildTalkJobSessionKey comment).
+    // Even unsandboxed talks get a per-job session to avoid inheriting
+    // agent-mode state from interactive chat sessions.
     const sessionKey = talkExecutionMode === 'unsandboxed'
-      ? buildUnsandboxedTalkSessionKey(talkId)
-      : buildTalkJobSessionKey(talkId, job.id, CLAWTALK_DEFAULT_AGENT_ID);
-    // Do NOT send x-openclaw-agent-id here.  When that header is present
-    // OpenClaw activates its embedded agent, which replaces the `tools`
-    // parameter with its own tool set (Read/Write/exec/…).  Gateway tools
-    // like google_docs_append are then only described in the system prompt
-    // but never exposed as callable functions.
-    //
-    // Without the header OpenClaw acts as a transparent LLM proxy, the
-    // `tools` array is forwarded to the model, and the gateway's
-    // runToolLoopNonStreaming handles tool calls through the ToolExecutor.
+      ? buildUnsandboxedTalkJobSessionKey(talkId, job.id)
+      : buildTalkJobSessionKey(talkId, job.id);
     const extraHeaders: Record<string, string> = {
       'x-openclaw-session-key': sessionKey,
       'x-openclaw-trace-id': traceId,
