@@ -63,7 +63,15 @@ async function refreshAccessToken(record: OAuthTokenFile): Promise<{ accessToken
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`Google OAuth token refresh failed (${res.status}): ${errText.slice(0, 200)}`);
+    const compactErr = errText.slice(0, 400);
+    if (res.status === 400 && /invalid_grant/i.test(compactErr)) {
+      throw new Error(
+        `Google OAuth refresh token is invalid or expired (invalid_grant). `
+        + `Re-auth Google and update client_id/client_secret/refresh_token in ${resolveTokenPath()}. `
+        + `Raw response: ${compactErr}`,
+      );
+    }
+    throw new Error(`Google OAuth token refresh failed (${res.status}): ${compactErr}`);
   }
 
   const data = await res.json() as { access_token?: string; expires_in?: number };

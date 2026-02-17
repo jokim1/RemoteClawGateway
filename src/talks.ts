@@ -66,6 +66,47 @@ const DEFAULT_SLACK_ACCOUNT_ID = 'default';
 const slackChannelNameByIdCache = new Map<string, { name: string; expiresAt: number }>();
 const slackChannelIdByNameCache = new Map<string, { id: string; name: string; expiresAt: number }>();
 
+type CatalogAuthRequirement = {
+  id: string;
+  ready: boolean;
+  message?: string;
+};
+
+async function resolveCatalogAuth(requirements: string[] | undefined): Promise<{
+  ready: boolean;
+  requirements: CatalogAuthRequirement[];
+}> {
+  const reqs = Array.isArray(requirements) ? requirements : [];
+  if (reqs.length === 0) {
+    return { ready: true, requirements: [] };
+  }
+
+  const statuses: CatalogAuthRequirement[] = [];
+  for (const req of reqs) {
+    if (req === 'google_oauth') {
+      const status = await googleDocsAuthStatus();
+      statuses.push({
+        id: req,
+        ready: Boolean(status.accessTokenReady),
+        message: status.accessTokenReady
+          ? undefined
+          : status.error || `Google OAuth is not ready. Token file: ${status.tokenPath}`,
+      });
+      continue;
+    }
+    statuses.push({
+      id: req,
+      ready: false,
+      message: `Auth provider "${req}" setup is not yet available in guided flow.`,
+    });
+  }
+
+  return {
+    ready: statuses.every((entry) => entry.ready),
+    requirements: statuses,
+  };
+}
+
 function normalizePermission(raw: unknown): PlatformPermission {
   const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
   if (value === 'read' || value === 'write' || value === 'read+write') {
@@ -1617,8 +1658,15 @@ export async function handleToolRoutes(ctx: HandlerContext, registry: ToolRegist
   // GET /api/tools/catalog — list tool catalog + installed state
   if (pathname === '/api/tools/catalog' && req.method === 'GET') {
     const tools = registry.listTools();
+    const catalogEntries = catalog.list(tools);
+    const catalogWithAuth = await Promise.all(
+      catalogEntries.map(async (entry) => ({
+        ...entry,
+        auth: await resolveCatalogAuth(entry.requiredAuth),
+      })),
+    );
     sendJson(res, 200, {
-      catalog: catalog.list(tools),
+      catalog: catalogWithAuth,
       installedCatalogIds: catalog.getInstalledIds(),
       installedTools: catalog.filterEnabledTools(tools),
       registeredTools: tools,
@@ -1645,7 +1693,13 @@ export async function handleToolRoutes(ctx: HandlerContext, registry: ToolRegist
       sendJson(res, 409, { error: result.error ?? 'Install failed' });
       return;
     }
-    sendJson(res, 200, { ok: true, installed: result.entry });
+    const auth = await resolveCatalogAuth(result.entry?.requiredAuth);
+    sendJson(res, 200, {
+      ok: true,
+      installed: result.entry,
+      auth,
+      authSetupRecommended: !auth.ready,
+    });
     return;
   }
 
