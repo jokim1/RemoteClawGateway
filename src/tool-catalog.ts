@@ -46,6 +46,20 @@ const CATALOG_DEFINITIONS: CatalogToolDefinition[] = [
     defaultInstalled: true,
   },
   {
+    id: 'google_docs_tabs',
+    name: 'Google Docs Tabs',
+    description: 'List, create, update, and delete tabs in Google Docs.',
+    version: '1.0.0',
+    status: 'installable',
+    toolNames: [
+      'google_docs_list_tabs',
+      'google_docs_add_tab',
+      'google_docs_update_tab',
+      'google_docs_delete_tab',
+    ],
+    requiredAuth: ['google_oauth'],
+  },
+  {
     id: 'web_fetch_extract',
     name: 'Web Fetch Extract',
     description: 'Fetch a URL and return clean extracted text.',

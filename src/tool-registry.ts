@@ -154,12 +154,141 @@ const GOOGLE_DOCS_APPEND_TOOL: ToolDefinition = {
           type: 'string',
           description: 'Text to append at the end of the document.',
         },
+        tab_id: {
+          type: 'string',
+          description: 'Optional destination tab ID. If set, appends into that tab.',
+        },
         profile: {
           type: 'string',
           description: 'Optional Google auth profile name (defaults to active profile or talk default).',
         },
       },
       required: ['doc_id', 'text'],
+    },
+  },
+};
+
+const GOOGLE_DOCS_LIST_TABS_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'google_docs_list_tabs',
+    description:
+      'List tabs in a Google Doc, including tab IDs and titles. ' +
+      'Accepts either a raw doc ID or full Google Docs URL.',
+    parameters: {
+      type: 'object',
+      properties: {
+        doc_id: {
+          type: 'string',
+          description: 'Google Docs document ID or full docs.google.com document URL.',
+        },
+        profile: {
+          type: 'string',
+          description: 'Optional Google auth profile name (defaults to active profile or talk default).',
+        },
+      },
+      required: ['doc_id'],
+    },
+  },
+};
+
+const GOOGLE_DOCS_ADD_TAB_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'google_docs_add_tab',
+    description:
+      'Add a tab to a Google Doc. Returns best-effort tab ID lookup after creation.',
+    parameters: {
+      type: 'object',
+      properties: {
+        doc_id: {
+          type: 'string',
+          description: 'Google Docs document ID or full docs.google.com document URL.',
+        },
+        title: {
+          type: 'string',
+          description: 'Optional tab title.',
+        },
+        index: {
+          type: 'number',
+          description: 'Optional insertion index.',
+        },
+        parent_tab_id: {
+          type: 'string',
+          description: 'Optional parent tab ID for nested tabs.',
+        },
+        profile: {
+          type: 'string',
+          description: 'Optional Google auth profile name (defaults to active profile or talk default).',
+        },
+      },
+      required: ['doc_id'],
+    },
+  },
+};
+
+const GOOGLE_DOCS_UPDATE_TAB_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'google_docs_update_tab',
+    description:
+      'Update an existing Google Doc tab (title/index/parent). Requires tab_id.',
+    parameters: {
+      type: 'object',
+      properties: {
+        doc_id: {
+          type: 'string',
+          description: 'Google Docs document ID or full docs.google.com document URL.',
+        },
+        tab_id: {
+          type: 'string',
+          description: 'Existing tab ID to update.',
+        },
+        title: {
+          type: 'string',
+          description: 'Optional new tab title.',
+        },
+        index: {
+          type: 'number',
+          description: 'Optional new tab index.',
+        },
+        parent_tab_id: {
+          type: 'string',
+          description: 'Optional parent tab ID (set empty string to clear).',
+        },
+        profile: {
+          type: 'string',
+          description: 'Optional Google auth profile name (defaults to active profile or talk default).',
+        },
+      },
+      required: ['doc_id', 'tab_id'],
+    },
+  },
+};
+
+const GOOGLE_DOCS_DELETE_TAB_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'google_docs_delete_tab',
+    description:
+      'Delete a tab from a Google Doc. Requires tab_id.',
+    parameters: {
+      type: 'object',
+      properties: {
+        doc_id: {
+          type: 'string',
+          description: 'Google Docs document ID or full docs.google.com document URL.',
+        },
+        tab_id: {
+          type: 'string',
+          description: 'Existing tab ID to delete.',
+        },
+        profile: {
+          type: 'string',
+          description: 'Optional Google auth profile name (defaults to active profile or talk default).',
+        },
+      },
+      required: ['doc_id', 'tab_id'],
     },
   },
 };
@@ -315,6 +444,10 @@ const BUILTIN_TOOLS = new Map<string, ToolDefinition>([
   ['google_docs_append', GOOGLE_DOCS_APPEND_TOOL],
   ['google_docs_read', GOOGLE_DOCS_READ_TOOL],
   ['google_docs_auth_status', GOOGLE_DOCS_AUTH_STATUS_TOOL],
+  ['google_docs_list_tabs', GOOGLE_DOCS_LIST_TABS_TOOL],
+  ['google_docs_add_tab', GOOGLE_DOCS_ADD_TAB_TOOL],
+  ['google_docs_update_tab', GOOGLE_DOCS_UPDATE_TAB_TOOL],
+  ['google_docs_delete_tab', GOOGLE_DOCS_DELETE_TAB_TOOL],
   ['google_drive_files', GOOGLE_DRIVE_FILES_TOOL],
   ['web_fetch_extract', WEB_FETCH_EXTRACT_TOOL],
   ['pdf_extract_text', PDF_EXTRACT_TEXT_TOOL],

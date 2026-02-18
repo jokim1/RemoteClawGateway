@@ -332,6 +332,38 @@ function extractDocumentText(doc: any): string {
   return parts.join('').trim();
 }
 
+export interface GoogleDocsTabSummary {
+  tabId: string;
+  title: string;
+  index?: number;
+  parentTabId?: string;
+}
+
+function collectTabs(
+  tabs: unknown,
+  output: GoogleDocsTabSummary[],
+  parentTabId?: string,
+): void {
+  if (!Array.isArray(tabs)) return;
+  for (const tab of tabs) {
+    if (!tab || typeof tab !== 'object') continue;
+    const rec = tab as Record<string, unknown>;
+    const props = (rec.tabProperties && typeof rec.tabProperties === 'object')
+      ? rec.tabProperties as Record<string, unknown>
+      : undefined;
+    const tabId = typeof props?.tabId === 'string' ? props.tabId : '';
+    if (tabId) {
+      output.push({
+        tabId,
+        title: typeof props?.title === 'string' ? props.title : 'Untitled',
+        ...(typeof props?.index === 'number' ? { index: props.index } : {}),
+        ...(parentTabId ? { parentTabId } : {}),
+      });
+    }
+    collectTabs(rec.childTabs, output, tabId || parentTabId);
+  }
+}
+
 export async function googleDocsCreate(params: {
   title: string;
   content?: string;
@@ -397,13 +429,15 @@ export async function googleDocsCreate(params: {
 export async function googleDocsAppend(params: {
   docId: string;
   text: string;
+  tabId?: string;
   profile?: string;
 }): Promise<{ documentId: string; appendedChars: number; url: string }> {
   const documentId = parseDocumentId(params.docId);
   const text = params.text ?? '';
   if (!text.trim()) throw new Error('text is required.');
 
-  const index = await getDocumentEndIndex(documentId, params.profile);
+  const tabId = params.tabId?.trim();
+  const index = tabId ? undefined : await getDocumentEndIndex(documentId, params.profile);
   await googleFetchJson(
     `https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}:batchUpdate`,
     {
@@ -412,7 +446,9 @@ export async function googleDocsAppend(params: {
         requests: [
           {
             insertText: {
-              location: { index },
+              ...(tabId
+                ? { endOfSegmentLocation: { ...(tabId ? { tabId } : {}) } }
+                : { location: { index } }),
               text,
             },
           },
@@ -425,6 +461,152 @@ export async function googleDocsAppend(params: {
   return {
     documentId,
     appendedChars: text.length,
+    url: `https://docs.google.com/document/d/${documentId}/edit`,
+  };
+}
+
+export async function googleDocsListTabs(params: {
+  docId: string;
+  profile?: string;
+}): Promise<{ documentId: string; url: string; tabs: GoogleDocsTabSummary[] }> {
+  const documentId = parseDocumentId(params.docId);
+  const url = new URL(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}`);
+  url.searchParams.set('includeTabsContent', 'true');
+  url.searchParams.set('fields', 'documentId,title,tabs(tabProperties(tabId,title,index,parentTabId),childTabs)');
+  const doc = await googleFetchJson(url.toString(), { method: 'GET' }, params.profile);
+  const tabs: GoogleDocsTabSummary[] = [];
+  collectTabs(doc?.tabs, tabs);
+  return {
+    documentId,
+    tabs,
+    url: `https://docs.google.com/document/d/${documentId}/edit`,
+  };
+}
+
+export async function googleDocsAddTab(params: {
+  docId: string;
+  title?: string;
+  index?: number;
+  parentTabId?: string;
+  profile?: string;
+}): Promise<{ documentId: string; url: string; tabId?: string; title?: string }> {
+  const documentId = parseDocumentId(params.docId);
+  const title = params.title?.trim();
+  const parentTabId = params.parentTabId?.trim();
+  const index = Number.isFinite(params.index) ? Math.max(0, Number(params.index)) : undefined;
+  await googleFetchJson(
+    `https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}:batchUpdate`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        requests: [
+          {
+            addDocumentTab: {
+              tabProperties: {
+                ...(title ? { title } : {}),
+                ...(index !== undefined ? { index } : {}),
+                ...(parentTabId ? { parentTabId } : {}),
+              },
+            },
+          },
+        ],
+      }),
+    },
+    params.profile,
+  );
+  const listed = await googleDocsListTabs({ docId: documentId, profile: params.profile });
+  const candidates = listed.tabs.filter((tab) => {
+    if (title && tab.title !== title) return false;
+    if (index !== undefined && tab.index !== index) return false;
+    if (parentTabId && tab.parentTabId !== parentTabId) return false;
+    return true;
+  });
+  const newest = candidates.length > 0 ? candidates[candidates.length - 1] : undefined;
+  return {
+    documentId,
+    url: `https://docs.google.com/document/d/${documentId}/edit`,
+    ...(newest?.tabId ? { tabId: newest.tabId } : {}),
+    ...(newest?.title ? { title: newest.title } : {}),
+  };
+}
+
+export async function googleDocsUpdateTab(params: {
+  docId: string;
+  tabId: string;
+  title?: string;
+  index?: number;
+  parentTabId?: string;
+  profile?: string;
+}): Promise<{ documentId: string; url: string; tabId: string }> {
+  const documentId = parseDocumentId(params.docId);
+  const tabId = params.tabId.trim();
+  if (!tabId) throw new Error('tabId is required.');
+  const title = params.title?.trim();
+  const parentTabId = params.parentTabId?.trim();
+  const index = Number.isFinite(params.index) ? Math.max(0, Number(params.index)) : undefined;
+  const fieldPaths: string[] = [];
+  if (title !== undefined) fieldPaths.push('title');
+  if (index !== undefined) fieldPaths.push('index');
+  if (parentTabId !== undefined) fieldPaths.push('parentTabId');
+  if (fieldPaths.length === 0) {
+    throw new Error('At least one of title, index, or parentTabId is required.');
+  }
+
+  await googleFetchJson(
+    `https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}:batchUpdate`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        requests: [
+          {
+            updateDocumentTabProperties: {
+              tabProperties: {
+                tabId,
+                ...(title !== undefined ? { title } : {}),
+                ...(index !== undefined ? { index } : {}),
+                ...(parentTabId !== undefined ? { parentTabId } : {}),
+              },
+              fields: fieldPaths.join(','),
+            },
+          },
+        ],
+      }),
+    },
+    params.profile,
+  );
+
+  return {
+    documentId,
+    tabId,
+    url: `https://docs.google.com/document/d/${documentId}/edit`,
+  };
+}
+
+export async function googleDocsDeleteTab(params: {
+  docId: string;
+  tabId: string;
+  profile?: string;
+}): Promise<{ documentId: string; tabId: string; url: string }> {
+  const documentId = parseDocumentId(params.docId);
+  const tabId = params.tabId.trim();
+  if (!tabId) throw new Error('tabId is required.');
+  await googleFetchJson(
+    `https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}:batchUpdate`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        requests: [
+          {
+            deleteTab: { tabId },
+          },
+        ],
+      }),
+    },
+    params.profile,
+  );
+  return {
+    documentId,
+    tabId,
     url: `https://docs.google.com/document/d/${documentId}/edit`,
   };
 }

@@ -1187,8 +1187,10 @@ async function handleGetTalkTools(
   }
   const catalog = getToolCatalog(ctx.pluginCfg.dataDir, ctx.logger);
   const registeredTools = registry?.listTools() ?? [];
-  const allTools = catalog.filterEnabledTools(registeredTools);
-  const effectiveToolStates = evaluateToolAvailability(allTools, talk);
+  const allTools = registeredTools;
+  const effectiveToolStates = evaluateToolAvailability(allTools, talk, {
+    isInstalled: (toolName) => catalog.isToolEnabled(toolName),
+  });
   const enabledTools = effectiveToolStates
     .filter((tool) => tool.enabled)
     .map(({ name, description, builtin }) => ({ name, description, builtin }));
@@ -1284,8 +1286,10 @@ async function handleUpdateTalkTools(
 
   const catalog = getToolCatalog(ctx.pluginCfg.dataDir, ctx.logger);
   const registeredTools = registry?.listTools() ?? [];
-  const allTools = catalog.filterEnabledTools(registeredTools);
-  const effectiveToolStates = evaluateToolAvailability(allTools, updated);
+  const allTools = registeredTools;
+  const effectiveToolStates = evaluateToolAvailability(allTools, updated, {
+    isInstalled: (toolName) => catalog.isToolEnabled(toolName),
+  });
   const enabledTools = effectiveToolStates
     .filter((tool) => tool.enabled)
     .map(({ name, description, builtin }) => ({ name, description, builtin }));

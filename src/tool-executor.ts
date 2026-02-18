@@ -13,14 +13,18 @@ import { extname, isAbsolute, join, resolve } from 'node:path';
 import type { Logger } from './types.js';
 import type { ToolRegistry } from './tool-registry.js';
 import {
+  googleDocsAddTab,
   googleDocsAppend,
   googleDocsAuthStatus,
   googleDocsAuthStatusForProfile,
   googleDocsCreate,
+  googleDocsDeleteTab,
+  googleDocsListTabs,
   googleDriveListFiles,
   googleDriveMoveFile,
   googleDriveSearchFiles,
   googleDocsRead,
+  googleDocsUpdateTab,
   GOOGLE_DOCS_REQUIRED_SCOPES,
 } from './google-docs.js';
 import { extractGoogleDocsDocumentIdFromUrl } from './google-docs-url.js';
@@ -99,6 +103,18 @@ export class ToolExecutor {
           break;
         case 'google_docs_auth_status':
           result = await this.execGoogleDocsAuthStatus(args);
+          break;
+        case 'google_docs_list_tabs':
+          result = await this.execGoogleDocsListTabs(args);
+          break;
+        case 'google_docs_add_tab':
+          result = await this.execGoogleDocsAddTab(args);
+          break;
+        case 'google_docs_update_tab':
+          result = await this.execGoogleDocsUpdateTab(args);
+          break;
+        case 'google_docs_delete_tab':
+          result = await this.execGoogleDocsDeleteTab(args);
           break;
         case 'google_drive_files':
           result = await this.execGoogleDriveFiles(args);
@@ -341,18 +357,20 @@ export class ToolExecutor {
   private async execGoogleDocsAppend(args: Record<string, unknown>): Promise<ToolExecResult> {
     const docId = String(args.doc_id ?? '').trim();
     const text = String(args.text ?? '');
+    const tabId = args.tab_id === undefined ? undefined : String(args.tab_id).trim();
     const profile = args.profile === undefined ? undefined : String(args.profile).trim();
     if (!docId || !text.trim()) {
       return { success: false, content: 'Missing required fields: doc_id, text', durationMs: 0 };
     }
 
     try {
-      const appended = await googleDocsAppend({ docId, text, profile: profile || undefined });
+      const appended = await googleDocsAppend({ docId, text, tabId: tabId || undefined, profile: profile || undefined });
       return {
         success: true,
         content:
           `Appended text to Google Doc.\n` +
           `Document ID: ${appended.documentId}\n` +
+          `${tabId ? `Tab ID: ${tabId}\n` : ''}` +
           `Appended characters: ${appended.appendedChars}\n` +
           `URL: ${appended.url}`,
         durationMs: 0,
@@ -426,6 +444,154 @@ export class ToolExecutor {
       return {
         success: false,
         content: `google_docs_auth_status failed: ${err instanceof Error ? err.message : String(err)}`,
+        durationMs: 0,
+      };
+    }
+  }
+
+  private async execGoogleDocsListTabs(args: Record<string, unknown>): Promise<ToolExecResult> {
+    const docId = String(args.doc_id ?? '').trim();
+    const profile = args.profile === undefined ? undefined : String(args.profile).trim();
+    if (!docId) {
+      return { success: false, content: 'Missing required field: doc_id', durationMs: 0 };
+    }
+    try {
+      const listed = await googleDocsListTabs({ docId, profile: profile || undefined });
+      const lines = listed.tabs.map((tab) => {
+        const parts = [`- tabId=${tab.tabId}`, `title="${tab.title}"`];
+        if (typeof tab.index === 'number') parts.push(`index=${tab.index}`);
+        if (tab.parentTabId) parts.push(`parentTabId=${tab.parentTabId}`);
+        return parts.join(' ');
+      });
+      return {
+        success: true,
+        content:
+          `Google Doc tabs (${listed.tabs.length}):\n` +
+          `${lines.join('\n') || '(none)'}\n` +
+          `Document ID: ${listed.documentId}\n` +
+          `URL: ${listed.url}`,
+        durationMs: 0,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        content:
+          `google_docs_list_tabs failed: ${msg}\n` +
+          `Required OAuth scopes: ${GOOGLE_DOCS_REQUIRED_SCOPES.join(', ')}`,
+        durationMs: 0,
+      };
+    }
+  }
+
+  private async execGoogleDocsAddTab(args: Record<string, unknown>): Promise<ToolExecResult> {
+    const docId = String(args.doc_id ?? '').trim();
+    const title = args.title === undefined ? undefined : String(args.title);
+    const index = args.index === undefined ? undefined : Number(args.index);
+    const parentTabId = args.parent_tab_id === undefined ? undefined : String(args.parent_tab_id);
+    const profile = args.profile === undefined ? undefined : String(args.profile).trim();
+    if (!docId) {
+      return { success: false, content: 'Missing required field: doc_id', durationMs: 0 };
+    }
+    try {
+      const created = await googleDocsAddTab({
+        docId,
+        title,
+        index,
+        parentTabId,
+        profile: profile || undefined,
+      });
+      return {
+        success: true,
+        content:
+          `Added Google Doc tab.\n` +
+          `Document ID: ${created.documentId}\n` +
+          `${created.tabId ? `Tab ID: ${created.tabId}\n` : ''}` +
+          `${created.title ? `Tab title: ${created.title}\n` : ''}` +
+          `URL: ${created.url}`,
+        durationMs: 0,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        content:
+          `google_docs_add_tab failed: ${msg}\n` +
+          `Required OAuth scopes: ${GOOGLE_DOCS_REQUIRED_SCOPES.join(', ')}`,
+        durationMs: 0,
+      };
+    }
+  }
+
+  private async execGoogleDocsUpdateTab(args: Record<string, unknown>): Promise<ToolExecResult> {
+    const docId = String(args.doc_id ?? '').trim();
+    const tabId = String(args.tab_id ?? '').trim();
+    const title = args.title === undefined ? undefined : String(args.title);
+    const index = args.index === undefined ? undefined : Number(args.index);
+    const parentTabId = args.parent_tab_id === undefined ? undefined : String(args.parent_tab_id);
+    const profile = args.profile === undefined ? undefined : String(args.profile).trim();
+    if (!docId || !tabId) {
+      return { success: false, content: 'Missing required fields: doc_id, tab_id', durationMs: 0 };
+    }
+    try {
+      const updated = await googleDocsUpdateTab({
+        docId,
+        tabId,
+        title,
+        index,
+        parentTabId,
+        profile: profile || undefined,
+      });
+      return {
+        success: true,
+        content:
+          `Updated Google Doc tab.\n` +
+          `Document ID: ${updated.documentId}\n` +
+          `Tab ID: ${updated.tabId}\n` +
+          `URL: ${updated.url}`,
+        durationMs: 0,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        content:
+          `google_docs_update_tab failed: ${msg}\n` +
+          `Required OAuth scopes: ${GOOGLE_DOCS_REQUIRED_SCOPES.join(', ')}`,
+        durationMs: 0,
+      };
+    }
+  }
+
+  private async execGoogleDocsDeleteTab(args: Record<string, unknown>): Promise<ToolExecResult> {
+    const docId = String(args.doc_id ?? '').trim();
+    const tabId = String(args.tab_id ?? '').trim();
+    const profile = args.profile === undefined ? undefined : String(args.profile).trim();
+    if (!docId || !tabId) {
+      return { success: false, content: 'Missing required fields: doc_id, tab_id', durationMs: 0 };
+    }
+    try {
+      const deleted = await googleDocsDeleteTab({
+        docId,
+        tabId,
+        profile: profile || undefined,
+      });
+      return {
+        success: true,
+        content:
+          `Deleted Google Doc tab.\n` +
+          `Document ID: ${deleted.documentId}\n` +
+          `Tab ID: ${deleted.tabId}\n` +
+          `URL: ${deleted.url}`,
+        durationMs: 0,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        content:
+          `google_docs_delete_tab failed: ${msg}\n` +
+          `Required OAuth scopes: ${GOOGLE_DOCS_REQUIRED_SCOPES.join(', ')}`,
         durationMs: 0,
       };
     }

@@ -41,6 +41,10 @@ const NETWORK_TOOLS = new Set([
   'google_docs_append',
   'google_docs_read',
   'google_docs_auth_status',
+  'google_docs_list_tabs',
+  'google_docs_add_tab',
+  'google_docs_update_tab',
+  'google_docs_delete_tab',
   'google_drive_files',
   'pdf_extract_text',
 ]);
@@ -106,11 +110,13 @@ export function isBrowserTool(toolName: string): boolean {
 }
 
 export type ToolBlockedReasonCode =
+  | 'blocked_not_installed'
   | 'blocked_allowlist'
   | 'blocked_denylist'
   | 'blocked_execution_mode'
   | 'blocked_filesystem'
-  | 'blocked_network';
+  | 'blocked_network'
+  | 'blocked_tool_mode';
 
 export interface ToolAvailabilityState extends ToolInfo {
   enabled: boolean;
@@ -123,10 +129,18 @@ function deriveToolBlockedReason(
   executionMode: ExecutionMode,
   filesystemAccess: FilesystemAccess,
   networkAccess: NetworkAccess,
+  toolMode: 'off' | 'confirm' | 'auto',
   allowSet: Set<string>,
   denySet: Set<string>,
+  isInstalled?: (toolName: string) => boolean,
 ): { code: ToolBlockedReasonCode; reason: string } | null {
   const key = toolName.toLowerCase();
+  if (isInstalled && !isInstalled(key)) {
+    return {
+      code: 'blocked_not_installed',
+      reason: 'Not installed in Tool Catalog.',
+    };
+  }
   if (denySet.has(key)) {
     return { code: 'blocked_denylist', reason: 'Blocked by Talk deny-list.' };
   }
@@ -151,16 +165,28 @@ function deriveToolBlockedReason(
       reason: 'Blocked by Network Access: Restricted.',
     };
   }
+  if (toolMode === 'off') {
+    return {
+      code: 'blocked_tool_mode',
+      reason: 'Blocked by Tool Approval: Off.',
+    };
+  }
   return null;
 }
 
 export function evaluateToolAvailability(
   allTools: ToolInfo[],
-  talk: Pick<TalkMeta, 'executionMode' | 'filesystemAccess' | 'networkAccess' | 'toolsAllow' | 'toolsDeny'>,
+  talk: Pick<TalkMeta, 'executionMode' | 'filesystemAccess' | 'networkAccess' | 'toolsAllow' | 'toolsDeny' | 'toolMode'>,
+  options?: {
+    isInstalled?: (toolName: string) => boolean;
+  },
 ): ToolAvailabilityState[] {
   const executionMode = resolveExecutionMode(talk);
   const filesystemAccess = resolveFilesystemAccess(talk);
   const networkAccess = resolveNetworkAccess(talk);
+  const toolMode = talk.toolMode === 'off' || talk.toolMode === 'confirm' || talk.toolMode === 'auto'
+    ? talk.toolMode
+    : 'auto';
   const allowSet = new Set((talk.toolsAllow ?? []).map((name) => name.toLowerCase()));
   const denySet = new Set((talk.toolsDeny ?? []).map((name) => name.toLowerCase()));
 
@@ -170,8 +196,10 @@ export function evaluateToolAvailability(
       executionMode,
       filesystemAccess,
       networkAccess,
+      toolMode,
       allowSet,
       denySet,
+      options?.isInstalled,
     );
     if (!blocked) return { ...tool, enabled: true };
     return {
