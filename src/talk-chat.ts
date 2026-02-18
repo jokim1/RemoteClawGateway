@@ -370,19 +370,59 @@ function parseJobBlocks(text: string): Array<{ schedule: string; prompt: string 
   return results;
 }
 
-/**
- * Guardrail for assistant-authored ```job``` blocks:
- * only auto-create jobs when the user explicitly requested scheduling/automation.
- */
-function userExplicitlyRequestedAutomation(message: string): boolean {
+export type AutomationIntentMode =
+  | 'none'
+  | 'recurring_explicit'
+  | 'ambiguous_followup'
+  | 'immediate_executable'
+  | 'immediate_blocked';
+
+function hasRecurringAutomationLanguage(message: string): boolean {
   const text = message.trim().toLowerCase();
   if (!text) return false;
-  return /\b(automation|automations|job|jobs|schedule|scheduled|reschedule|remind|reminder|follow\s*up|check\s*back|recurring|cron)\b/.test(text)
+  return /\b(automation|automations|job|jobs|schedule|scheduled|reschedule|recurring|cron)\b/.test(text)
     || /\b(every\s+\d+\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks))\b/.test(text)
     || /\b(daily|weekly|monthly|yearly)\b/.test(text)
+    || /\bon\s+[^\s]+/.test(text)
     || /\b(in\s+\d+\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks))\b/.test(text)
     || /\b(at\s+\d{1,2}(:\d{2})?\s*(am|pm)?)\b/.test(text)
     || /\b(tomorrow|next\s+(hour|day|week|month))\b/.test(text);
+}
+
+function hasAmbiguousFollowupLanguage(message: string): boolean {
+  const text = message.trim().toLowerCase();
+  if (!text) return false;
+  return /\b(follow\s*up|check\s*back|remind|reminder|later)\b/.test(text)
+    && !hasRecurringAutomationLanguage(text);
+}
+
+export function classifyUserAutomationIntent(params: {
+  message: string;
+  likelyActionRequest: boolean;
+  toolsEnabledForTurn: boolean;
+  availableToolCount: number;
+  hasPolicyBlockedTools: boolean;
+}): AutomationIntentMode {
+  const {
+    message,
+    likelyActionRequest,
+    toolsEnabledForTurn,
+    availableToolCount,
+    hasPolicyBlockedTools,
+  } = params;
+
+  if (hasRecurringAutomationLanguage(message)) return 'recurring_explicit';
+  if (hasAmbiguousFollowupLanguage(message)) return 'ambiguous_followup';
+  if (!likelyActionRequest) return 'none';
+
+  const blocked = !toolsEnabledForTurn || availableToolCount === 0 || hasPolicyBlockedTools;
+  return blocked ? 'immediate_blocked' : 'immediate_executable';
+}
+
+export function classifyJobScheduleType(schedule: string): 'once' | 'recurring' | 'event' {
+  if (parseEventTrigger(schedule)) return 'event';
+  if (/^(in\s|at\s)/i.test(schedule.trim())) return 'once';
+  return 'recurring';
 }
 
 export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
@@ -461,6 +501,9 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     .filter((tool) => tool.enabled)
     .map(({ name, description, builtin }) => ({ name, description, builtin }));
   const availableToolInfos = prioritizeTurnToolInfos(policyFilteredToolInfos, body.message);
+  const hasPolicyBlockedTools = likelyActionRequest
+    && policyFilteredToolInfos.length === 0
+    && prePolicyToolInfos.length > 0;
   const hasGoogleDriveTool = availableToolInfos.some(
     (tool) => tool.name.trim().toLowerCase() === 'google_drive_files',
   );
@@ -786,6 +829,13 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
 
   // Tool policy derived above and mirrored in prompt composition.
   const disableTools = !enableToolsForTurn || availableToolInfos.length === 0;
+  const automationIntent = classifyUserAutomationIntent({
+    message: body.message,
+    likelyActionRequest,
+    toolsEnabledForTurn: !disableTools,
+    availableToolCount: availableToolInfos.length,
+    hasPolicyBlockedTools,
+  });
   const enabledToolNames = new Set(availableToolInfos.map((tool) => tool.name.toLowerCase()));
   const tools = disableTools
     ? []
@@ -806,7 +856,7 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
             : 'non-action-turn';
     logger.info(`TalkChat: tool bypass (${reason}) talkId=${talkId}`);
   }
-  if (likelyActionRequest && policyFilteredToolInfos.length === 0 && prePolicyToolInfos.length > 0) {
+  if (hasPolicyBlockedTools) {
     const blocked = policyStates.find((tool) => !tool.enabled && tool.reason);
     emitStatusEvent(res, {
       code: 'TOOLS_BLOCKED_BY_POLICY',
@@ -1036,23 +1086,39 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
       // Auto-create jobs from ```job``` blocks in the response only when user explicitly
       // asked for scheduled/automation behavior.
       const jobBlocks = parseJobBlocks(fullContent);
-      const allowAutoJobCreation = userExplicitlyRequestedAutomation(body.message);
-      if (!allowAutoJobCreation && jobBlocks.length > 0) {
+      if (jobBlocks.length > 0) {
         logger.info(
-          `TalkChat: ignored ${jobBlocks.length} assistant job block(s) for immediate request in talk ${talkId}`,
+          `TalkChat: job creation intent mode=${automationIntent} jobBlocks=${jobBlocks.length} talkId=${talkId}`,
         );
       }
-      for (const { schedule, prompt } of (allowAutoJobCreation ? jobBlocks : [])) {
-        const scheduleError = validateSchedule(schedule);
-        if (scheduleError) {
-          logger.warn(`TalkChat: skipped auto-created job with invalid schedule "${schedule}": ${scheduleError}`);
+      for (const { schedule, prompt } of jobBlocks) {
+        const scheduleType = classifyJobScheduleType(schedule);
+        let allow = false;
+        let normalizedSchedule = schedule;
+        let type: 'once' | 'recurring' | 'event' = scheduleType;
+
+        if (automationIntent === 'recurring_explicit') {
+          allow = true;
+        } else if (automationIntent === 'immediate_blocked') {
+          allow = true;
+          normalizedSchedule = 'in 1m';
+          type = 'once';
+        }
+
+        if (!allow) {
+          logger.info(
+            `TalkChat: blocked assistant job block schedule="${schedule}" scheduleType=${scheduleType} intent=${automationIntent} talkId=${talkId}`,
+          );
           continue;
         }
 
-        let normalizedSchedule = schedule;
-        const eventScope = parseEventTrigger(schedule);
-        let type: 'once' | 'recurring' | 'event';
-        if (eventScope) {
+        const scheduleError = validateSchedule(normalizedSchedule);
+        if (scheduleError) {
+          logger.warn(`TalkChat: skipped auto-created job with invalid schedule "${normalizedSchedule}": ${scheduleError}`);
+          continue;
+        }
+        const eventScope = parseEventTrigger(normalizedSchedule);
+        if (type === 'event' && eventScope) {
           const bindings = meta.platformBindings ?? [];
           let resolvedScope = eventScope;
           const platformMatch = eventScope.match(/^platform(\d+)$/i);
@@ -1078,11 +1144,6 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
           }
 
           normalizedSchedule = `on ${resolvedScope}`;
-          type = 'event';
-        } else if (/^(in\s|at\s)/i.test(normalizedSchedule)) {
-          type = 'once';
-        } else {
-          type = 'recurring';
         }
         const job = store.addJob(talkId, normalizedSchedule, prompt, type);
         if (job) {

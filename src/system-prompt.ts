@@ -286,6 +286,8 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
     `create a one-off automation to ensure you deliver.\n\n` +
     `The prompt must be self-contained — it runs independently with only the Talk context. ` +
     `Create automations when the user asks for something recurring, scheduled, or when you commit to a follow-up.\n` +
+    `If you create an automation, explicitly tell the user a job was created and include the schedule.\n` +
+    `If intent is ambiguous ("follow up later" without timing), ask one confirmation question before creating a job.\n` +
     `Do NOT create automations for immediate one-turn requests that should be executed now with available tools.\n\n` +
     `### Moving External Tasks to Talk Automations\n` +
     `If the user asks to move an external cron job, scheduled task, or recurring reminder ` +
