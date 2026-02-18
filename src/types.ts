@@ -254,6 +254,10 @@ export interface TalkMeta {
   toolMode?: 'off' | 'confirm' | 'auto';
   /** Runtime selection for tool execution in this talk. */
   executionMode?: 'openclaw' | 'full_control';
+  /** Filesystem policy for tool execution in this talk. */
+  filesystemAccess?: 'workspace_sandbox' | 'full_host_access';
+  /** Network egress policy for tool execution in this talk. */
+  networkAccess?: 'restricted' | 'full_outbound';
   /** Optional allow-list of tool names for this talk (empty = all). */
   toolsAllow?: string[];
   /** Optional deny-list of tool names for this talk. */

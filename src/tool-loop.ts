@@ -186,6 +186,8 @@ export interface ToolLoopStreamOptions {
   traceId?: string;
   /** Optional default Google auth profile for this run. */
   defaultGoogleAuthProfile?: string;
+  /** Optional callback for user-visible status updates. */
+  onStatus?: (payload: { code: string; message: string; level?: 'info' | 'warn' | 'error'; meta?: Record<string, unknown> }) => void;
 }
 
 export interface ToolLoopStreamResult {
@@ -264,6 +266,8 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
       let ttftAborted = false;
       let sawFirstDelta = false;
       const ttftMs = Math.max(5_000, opts.firstTokenTimeoutMs ?? 90_000);
+      let ttftWarn30: ReturnType<typeof setTimeout> | undefined;
+      let ttftWarn60: ReturnType<typeof setTimeout> | undefined;
       const markFirstDelta = () => {
         if (sawFirstDelta) return;
         sawFirstDelta = true;
@@ -271,7 +275,39 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
           clearTimeout(ttftTimer);
           ttftTimer = undefined;
         }
+        if (ttftWarn30) {
+          clearTimeout(ttftWarn30);
+          ttftWarn30 = undefined;
+        }
+        if (ttftWarn60) {
+          clearTimeout(ttftWarn60);
+          ttftWarn60 = undefined;
+        }
       };
+      opts.onStatus?.({
+        code: 'LLM_REQUEST_STARTED',
+        message: `Calling model ${model} (iteration ${iteration + 1}, attempt ${attempt + 1})...`,
+        level: 'info',
+        meta: { model, iteration: iteration + 1, attempt: attempt + 1 },
+      });
+      ttftWarn30 = setTimeout(() => {
+        if (sawFirstDelta) return;
+        opts.onStatus?.({
+          code: 'WAITING_FIRST_TOKEN_30S',
+          message: 'Still waiting for first model token (30s).',
+          level: 'warn',
+          meta: { model, iteration: iteration + 1, attempt: attempt + 1 },
+        });
+      }, Math.min(ttftMs - 1, 30_000));
+      ttftWarn60 = setTimeout(() => {
+        if (sawFirstDelta) return;
+        opts.onStatus?.({
+          code: 'WAITING_FIRST_TOKEN_60S',
+          message: 'Still waiting for first model token (60s).',
+          level: 'warn',
+          meta: { model, iteration: iteration + 1, attempt: attempt + 1 },
+        });
+      }, Math.min(ttftMs - 1, 60_000));
       ttftTimer = setTimeout(() => {
         if (sawFirstDelta) return;
         ttftAborted = true;
@@ -391,9 +427,23 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
           clearTimeout(ttftTimer);
           ttftTimer = undefined;
         }
+        if (ttftWarn30) {
+          clearTimeout(ttftWarn30);
+          ttftWarn30 = undefined;
+        }
+        if (ttftWarn60) {
+          clearTimeout(ttftWarn60);
+          ttftWarn60 = undefined;
+        }
         // --- Retry decision ---
         if (attempt === 0 && !retried && isTransientError(effectiveErr, clientSignal)) {
           retried = true;
+          opts.onStatus?.({
+            code: 'RETRYING_TRANSIENT_ERROR',
+            message: 'Transient model error detected. Retrying once...',
+            level: 'warn',
+            meta: { iteration: iteration + 1 },
+          });
 
           if (iterContent) {
             // Mid-stream failure: partial content was already sent to client.
@@ -421,6 +471,14 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
       if (ttftTimer) {
         clearTimeout(ttftTimer);
         ttftTimer = undefined;
+      }
+      if (ttftWarn30) {
+        clearTimeout(ttftWarn30);
+        ttftWarn30 = undefined;
+      }
+      if (ttftWarn60) {
+        clearTimeout(ttftWarn60);
+        ttftWarn60 = undefined;
       }
 
       // --- Success path (no error thrown) ---
@@ -498,6 +556,12 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
 
         // Continue the loop — LLM will see the tool results
         logger.info(`ToolLoop: iteration ${iteration + 1}, executed ${toolCalls.length} tool(s)`);
+        opts.onStatus?.({
+          code: 'TOOLS_EXECUTED',
+          message: `Executed ${toolCalls.length} tool call(s); continuing...`,
+          level: 'info',
+          meta: { iteration: iteration + 1, toolCalls: toolCalls.length },
+        });
       } else if (finishReason === 'length' && continuations < MAX_CONTINUATIONS) {
         // If the model hit max output tokens, auto-continue
         continuations++;
@@ -510,6 +574,12 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
 
         res.write(': keepalive\n\n');
         abort.touch();
+        opts.onStatus?.({
+          code: 'AUTO_CONTINUE',
+          message: 'Model hit output limit; auto-continuing.',
+          level: 'info',
+          meta: { continuations },
+        });
       }
 
       // Break out of the retry loop — success

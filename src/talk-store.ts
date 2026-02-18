@@ -68,6 +68,20 @@ function normalizeExecutionMode(raw: unknown): 'openclaw' | 'full_control' {
   return 'openclaw';
 }
 
+function normalizeFilesystemAccess(raw: unknown): 'workspace_sandbox' | 'full_host_access' {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (value === 'workspace_sandbox' || value === 'workspace' || value === 'sandbox') return 'workspace_sandbox';
+  if (value === 'full_host_access' || value === 'full_host' || value === 'full') return 'full_host_access';
+  return 'full_host_access';
+}
+
+function normalizeNetworkAccess(raw: unknown): 'restricted' | 'full_outbound' {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (value === 'restricted') return 'restricted';
+  if (value === 'full_outbound' || value === 'full') return 'full_outbound';
+  return 'full_outbound';
+}
+
 function normalizeToolNames(input: unknown): string[] {
   if (!Array.isArray(input)) return [];
   const seen = new Set<string>();
@@ -229,6 +243,8 @@ export class TalkStore {
           meta.platformBehaviors = normalizePlatformBehaviors(meta.platformBehaviors, meta.platformBindings);
           meta.toolMode = normalizeToolMode(meta.toolMode);
           meta.executionMode = normalizeExecutionMode(meta.executionMode);
+          meta.filesystemAccess = normalizeFilesystemAccess(meta.filesystemAccess);
+          meta.networkAccess = normalizeNetworkAccess(meta.networkAccess);
           meta.toolsAllow = normalizeToolNames(meta.toolsAllow);
           meta.toolsDeny = normalizeToolNames(meta.toolsDeny);
           meta.googleAuthProfile = normalizeGoogleAuthProfile(meta.googleAuthProfile);
@@ -271,6 +287,8 @@ export class TalkStore {
       platformBindings: [],
       platformBehaviors: [],
       executionMode: 'openclaw',
+      filesystemAccess: 'full_host_access',
+      networkAccess: 'full_outbound',
       toolMode: 'auto',
       toolsAllow: [],
       toolsDeny: [],
@@ -300,7 +318,7 @@ export class TalkStore {
     updates: Partial<
       Pick<
         TalkMeta,
-        'topicTitle' | 'objective' | 'model' | 'directives' | 'platformBindings' | 'platformBehaviors' | 'toolMode' | 'executionMode' | 'toolsAllow' | 'toolsDeny' | 'googleAuthProfile'
+        'topicTitle' | 'objective' | 'model' | 'directives' | 'platformBindings' | 'platformBehaviors' | 'toolMode' | 'executionMode' | 'filesystemAccess' | 'networkAccess' | 'toolsAllow' | 'toolsDeny' | 'googleAuthProfile'
       >
     >,
   ): TalkMeta | null {
@@ -326,6 +344,12 @@ export class TalkStore {
     }
     if (updates.executionMode !== undefined) {
       meta.executionMode = normalizeExecutionMode(updates.executionMode);
+    }
+    if (updates.filesystemAccess !== undefined) {
+      meta.filesystemAccess = normalizeFilesystemAccess(updates.filesystemAccess);
+    }
+    if (updates.networkAccess !== undefined) {
+      meta.networkAccess = normalizeNetworkAccess(updates.networkAccess);
     }
     if (updates.toolsAllow !== undefined) {
       meta.toolsAllow = normalizeToolNames(updates.toolsAllow);

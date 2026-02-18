@@ -30,6 +30,17 @@ import {
   upsertGoogleDocsAuthConfig,
 } from './google-docs.js';
 import { getToolCatalog } from './tool-catalog.js';
+import {
+  EXECUTION_MODE_OPTIONS,
+  evaluateToolAvailability,
+  executionModeLabel,
+  normalizeExecutionModeInput,
+  normalizeFilesystemAccessInput,
+  normalizeNetworkAccessInput,
+  resolveExecutionMode,
+  resolveFilesystemAccess,
+  resolveNetworkAccess,
+} from './talk-policy.js';
 
 type PlatformBindingsValidationResult =
   | { ok: true; bindings: PlatformBinding[]; ownershipKeys: string[] }
@@ -145,16 +156,6 @@ function normalizeToolModeInput(raw: unknown): 'off' | 'confirm' | 'auto' | unde
   return undefined;
 }
 
-function normalizeExecutionModeInput(raw: unknown): 'openclaw' | 'full_control' | undefined {
-  if (typeof raw !== 'string') return undefined;
-  const value = raw.trim().toLowerCase();
-  if (value === 'openclaw' || value === 'full_control') return value;
-  // Accept old values from stale clients
-  if (value === 'unsandboxed') return 'full_control';
-  if (value === 'inherit' || value === 'sandboxed') return 'openclaw';
-  return undefined;
-}
-
 function normalizeToolNameListInput(raw: unknown): string[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const seen = new Set<string>();
@@ -178,6 +179,18 @@ function normalizeGoogleAuthProfileInput(raw: unknown): string | undefined {
   if (!trimmed) return '';
   const normalized = trimmed.replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '');
   return normalized || '';
+}
+
+function executionModeValidationError(): string {
+  return 'executionMode must be one of: openclaw, full_control, openclaw_agent, clawtalk_proxy';
+}
+
+function filesystemAccessValidationError(): string {
+  return 'filesystemAccess must be one of: workspace_sandbox, full_host_access';
+}
+
+function networkAccessValidationError(): string {
+  return 'networkAccess must be one of: restricted, full_outbound';
 }
 
 function mapChannelResponseSettingsInput(input: unknown): unknown {
@@ -969,12 +982,16 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
     channelResponseSettings?: any[];
     toolMode?: string;
     executionMode?: string;
+    filesystemAccess?: string;
+    networkAccess?: string;
     toolsAllow?: string[];
     toolsDeny?: string[];
     googleAuthProfile?: string;
     toolPolicy?: {
       mode?: string;
       executionMode?: string;
+      filesystemAccess?: string;
+      networkAccess?: string;
       allow?: string[];
       deny?: string[];
       googleAuthProfile?: string;
@@ -1007,6 +1024,12 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
   if (body.executionMode === undefined && body.toolPolicy?.executionMode !== undefined) {
     body.executionMode = body.toolPolicy.executionMode;
   }
+  if (body.filesystemAccess === undefined && body.toolPolicy?.filesystemAccess !== undefined) {
+    body.filesystemAccess = body.toolPolicy.filesystemAccess;
+  }
+  if (body.networkAccess === undefined && body.toolPolicy?.networkAccess !== undefined) {
+    body.networkAccess = body.toolPolicy.networkAccess;
+  }
   if (body.toolsDeny === undefined && body.toolPolicy?.deny !== undefined) {
     body.toolsDeny = body.toolPolicy.deny;
   }
@@ -1021,7 +1044,17 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
   }
   const executionMode = normalizeExecutionModeInput(body.executionMode);
   if (body.executionMode !== undefined && executionMode === undefined) {
-    sendJson(ctx.res, 400, { error: 'executionMode must be one of: openclaw, full_control' });
+    sendJson(ctx.res, 400, { error: executionModeValidationError() });
+    return;
+  }
+  const filesystemAccess = normalizeFilesystemAccessInput(body.filesystemAccess);
+  if (body.filesystemAccess !== undefined && filesystemAccess === undefined) {
+    sendJson(ctx.res, 400, { error: filesystemAccessValidationError() });
+    return;
+  }
+  const networkAccess = normalizeNetworkAccessInput(body.networkAccess);
+  if (body.networkAccess !== undefined && networkAccess === undefined) {
+    sendJson(ctx.res, 400, { error: networkAccessValidationError() });
     return;
   }
   const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
@@ -1077,6 +1110,8 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
     ...(body.platformBehaviors !== undefined ? { platformBehaviors: body.platformBehaviors } : {}),
     ...(toolMode !== undefined ? { toolMode } : {}),
     ...(executionMode !== undefined ? { executionMode } : {}),
+    ...(filesystemAccess !== undefined ? { filesystemAccess } : {}),
+    ...(networkAccess !== undefined ? { networkAccess } : {}),
     ...(toolsAllow !== undefined ? { toolsAllow } : {}),
     ...(toolsDeny !== undefined ? { toolsDeny } : {}),
     ...(googleAuthProfile !== undefined ? { googleAuthProfile: googleAuthProfile || undefined } : {}),
@@ -1088,7 +1123,16 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
 }
 
 async function handleListTalks(ctx: HandlerContext, store: TalkStore): Promise<void> {
-  const talks = store.listTalks();
+  const talks = store.listTalks().map((talk) => {
+    const executionMode = resolveExecutionMode(talk);
+    return {
+      ...talk,
+      executionMode,
+      executionModeLabel: executionModeLabel(executionMode),
+      filesystemAccess: resolveFilesystemAccess(talk),
+      networkAccess: resolveNetworkAccess(talk),
+    };
+  });
   sendJson(ctx.res, 200, { talks });
 }
 
@@ -1099,7 +1143,18 @@ async function handleGetTalk(ctx: HandlerContext, store: TalkStore, talkId: stri
     return;
   }
   const contextMd = await store.getContextMd(talkId);
-  sendJson(ctx.res, 200, { ...talk, contextMd });
+  const executionMode = resolveExecutionMode(talk);
+  sendJson(ctx.res, 200, {
+    ...talk,
+    executionMode,
+    executionModeLabel: executionModeLabel(executionMode),
+    executionModeOptions: EXECUTION_MODE_OPTIONS,
+    filesystemAccess: resolveFilesystemAccess(talk),
+    filesystemAccessOptions: ['workspace_sandbox', 'full_host_access'],
+    networkAccess: resolveNetworkAccess(talk),
+    networkAccessOptions: ['restricted', 'full_outbound'],
+    contextMd,
+  });
 }
 
 function selectTalkTools(
@@ -1133,17 +1188,27 @@ async function handleGetTalkTools(
   const catalog = getToolCatalog(ctx.pluginCfg.dataDir, ctx.logger);
   const registeredTools = registry?.listTools() ?? [];
   const allTools = catalog.filterEnabledTools(registeredTools);
-  const enabledTools = selectTalkTools(allTools, talk.toolsAllow, talk.toolsDeny);
+  const effectiveToolStates = evaluateToolAvailability(allTools, talk);
+  const enabledTools = effectiveToolStates
+    .filter((tool) => tool.enabled)
+    .map(({ name, description, builtin }) => ({ name, description, builtin }));
+  const executionMode = resolveExecutionMode(talk);
   sendJson(ctx.res, 200, {
     talkId,
     toolMode: talk.toolMode ?? 'auto',
-    executionMode: talk.executionMode ?? 'openclaw',
-    executionModeOptions: ['openclaw', 'full_control'],
+    executionMode,
+    executionModeLabel: executionModeLabel(executionMode),
+    executionModeOptions: EXECUTION_MODE_OPTIONS,
+    filesystemAccess: resolveFilesystemAccess(talk),
+    filesystemAccessOptions: ['workspace_sandbox', 'full_host_access'],
+    networkAccess: resolveNetworkAccess(talk),
+    networkAccessOptions: ['restricted', 'full_outbound'],
     toolsAllow: talk.toolsAllow ?? [],
     toolsDeny: talk.toolsDeny ?? [],
     googleAuthProfile: talk.googleAuthProfile,
     availableTools: allTools,
     enabledTools,
+    effectiveTools: effectiveToolStates,
   });
 }
 
@@ -1156,6 +1221,8 @@ async function handleUpdateTalkTools(
   let body: {
     toolMode?: string;
     executionMode?: string;
+    filesystemAccess?: string;
+    networkAccess?: string;
     toolsAllow?: string[];
     toolsDeny?: string[];
     googleAuthProfile?: string;
@@ -1180,7 +1247,17 @@ async function handleUpdateTalkTools(
   }
   const executionMode = normalizeExecutionModeInput(body.executionMode);
   if (body.executionMode !== undefined && executionMode === undefined) {
-    sendJson(ctx.res, 400, { error: 'executionMode must be one of: openclaw, full_control' });
+    sendJson(ctx.res, 400, { error: executionModeValidationError() });
+    return;
+  }
+  const filesystemAccess = normalizeFilesystemAccessInput(body.filesystemAccess);
+  if (body.filesystemAccess !== undefined && filesystemAccess === undefined) {
+    sendJson(ctx.res, 400, { error: filesystemAccessValidationError() });
+    return;
+  }
+  const networkAccess = normalizeNetworkAccessInput(body.networkAccess);
+  if (body.networkAccess !== undefined && networkAccess === undefined) {
+    sendJson(ctx.res, 400, { error: networkAccessValidationError() });
     return;
   }
   const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
@@ -1194,6 +1271,8 @@ async function handleUpdateTalkTools(
   const updated = store.updateTalk(talkId, {
     ...(toolMode !== undefined ? { toolMode } : {}),
     ...(executionMode !== undefined ? { executionMode } : {}),
+    ...(filesystemAccess !== undefined ? { filesystemAccess } : {}),
+    ...(networkAccess !== undefined ? { networkAccess } : {}),
     ...(toolsAllow !== undefined ? { toolsAllow } : {}),
     ...(toolsDeny !== undefined ? { toolsDeny } : {}),
     ...(googleAuthProfile !== undefined ? { googleAuthProfile: googleAuthProfile || undefined } : {}),
@@ -1206,17 +1285,27 @@ async function handleUpdateTalkTools(
   const catalog = getToolCatalog(ctx.pluginCfg.dataDir, ctx.logger);
   const registeredTools = registry?.listTools() ?? [];
   const allTools = catalog.filterEnabledTools(registeredTools);
-  const enabledTools = selectTalkTools(allTools, updated.toolsAllow, updated.toolsDeny);
+  const effectiveToolStates = evaluateToolAvailability(allTools, updated);
+  const enabledTools = effectiveToolStates
+    .filter((tool) => tool.enabled)
+    .map(({ name, description, builtin }) => ({ name, description, builtin }));
+  const executionModeResolved = resolveExecutionMode(updated);
   sendJson(ctx.res, 200, {
     talkId,
     toolMode: updated.toolMode ?? 'auto',
-    executionMode: updated.executionMode ?? 'openclaw',
-    executionModeOptions: ['openclaw', 'full_control'],
+    executionMode: executionModeResolved,
+    executionModeLabel: executionModeLabel(executionModeResolved),
+    executionModeOptions: EXECUTION_MODE_OPTIONS,
+    filesystemAccess: resolveFilesystemAccess(updated),
+    filesystemAccessOptions: ['workspace_sandbox', 'full_host_access'],
+    networkAccess: resolveNetworkAccess(updated),
+    networkAccessOptions: ['restricted', 'full_outbound'],
     toolsAllow: updated.toolsAllow ?? [],
     toolsDeny: updated.toolsDeny ?? [],
     googleAuthProfile: updated.googleAuthProfile,
     availableTools: allTools,
     enabledTools,
+    effectiveTools: effectiveToolStates,
   });
 }
 
@@ -1235,12 +1324,16 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
     channelResponseSettings?: any[];
     toolMode?: string;
     executionMode?: string;
+    filesystemAccess?: string;
+    networkAccess?: string;
     toolsAllow?: string[];
     toolsDeny?: string[];
     googleAuthProfile?: string;
     toolPolicy?: {
       mode?: string;
       executionMode?: string;
+      filesystemAccess?: string;
+      networkAccess?: string;
       allow?: string[];
       deny?: string[];
       googleAuthProfile?: string;
@@ -1280,6 +1373,12 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
   if (body.executionMode === undefined && body.toolPolicy?.executionMode !== undefined) {
     body.executionMode = body.toolPolicy.executionMode;
   }
+  if (body.filesystemAccess === undefined && body.toolPolicy?.filesystemAccess !== undefined) {
+    body.filesystemAccess = body.toolPolicy.filesystemAccess;
+  }
+  if (body.networkAccess === undefined && body.toolPolicy?.networkAccess !== undefined) {
+    body.networkAccess = body.toolPolicy.networkAccess;
+  }
   if (body.toolsDeny === undefined && body.toolPolicy?.deny !== undefined) {
     body.toolsDeny = body.toolPolicy.deny;
   }
@@ -1294,7 +1393,17 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
   }
   const executionMode = normalizeExecutionModeInput(body.executionMode);
   if (body.executionMode !== undefined && executionMode === undefined) {
-    sendJson(ctx.res, 400, { error: 'executionMode must be one of: openclaw, full_control' });
+    sendJson(ctx.res, 400, { error: executionModeValidationError() });
+    return;
+  }
+  const filesystemAccess = normalizeFilesystemAccessInput(body.filesystemAccess);
+  if (body.filesystemAccess !== undefined && filesystemAccess === undefined) {
+    sendJson(ctx.res, 400, { error: filesystemAccessValidationError() });
+    return;
+  }
+  const networkAccess = normalizeNetworkAccessInput(body.networkAccess);
+  if (body.networkAccess !== undefined && networkAccess === undefined) {
+    sendJson(ctx.res, 400, { error: networkAccessValidationError() });
     return;
   }
   const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
@@ -1366,6 +1475,8 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
     platformBehaviors: body.platformBehaviors,
     toolMode,
     executionMode,
+    filesystemAccess,
+    networkAccess,
     toolsAllow,
     toolsDeny,
     ...(googleAuthProfile !== undefined ? { googleAuthProfile: googleAuthProfile || undefined } : {}),
