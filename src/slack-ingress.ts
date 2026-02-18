@@ -20,7 +20,7 @@ const MAX_CONTEXT_BUDGET_BYTES = 60 * 1024;
 const MIN_HISTORY_MESSAGES = 8;
 const RESERVED_OVERHEAD_BYTES = 8 * 1024;
 const MIN_HISTORY_BUDGET_BYTES = 4 * 1024;
-const LLM_TIMEOUT_MS = 120_000;
+const DEFAULT_LLM_TIMEOUT_MS = 240_000;
 const SEND_TIMEOUT_MS = 30_000;
 const EVENT_TTL_MS = 6 * 60 * 60_000;
 const DEFAULT_RETRY_ATTEMPTS = 3;
@@ -28,7 +28,7 @@ const DEFAULT_RETRY_BASE_MS = 1_000;
 const DEFAULT_MAX_QUEUE = 1_000;
 const DEFAULT_SUPPRESS_TTL_MS = 120_000;
 const DEFAULT_SUPPRESS_MAX_CANCELS = 3;
-const DEFAULT_PROCESS_TIMEOUT_MS = 150_000;
+const DEFAULT_PROCESS_TIMEOUT_MS = 300_000;
 const SLACK_DEFAULT_ACCOUNT = 'default';
 
 type SlackIngressEvent = {
@@ -326,6 +326,15 @@ function getProcessTimeoutMs(): number {
     DEFAULT_PROCESS_TIMEOUT_MS,
     10_000,
     600_000,
+  );
+}
+
+function getLlmTimeoutMs(): number {
+  return parseIntegerEnv(
+    'CLAWTALK_INGRESS_LLM_TIMEOUT_MS',
+    DEFAULT_LLM_TIMEOUT_MS,
+    30_000,
+    900_000,
   );
 }
 
@@ -812,7 +821,7 @@ async function callLlmForEvent(params: {
       tool_choice: 'none',
       stream: false,
     }),
-    signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
+    signal: AbortSignal.timeout(getLlmTimeoutMs()),
   });
 
   if (!llmResponse.ok) {
