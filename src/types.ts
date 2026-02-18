@@ -52,6 +52,7 @@ export interface PluginApi {
   registerHttpHandler: (
     handler: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>
   ) => void;
+  registerTool?: (tool: Record<string, unknown>, opts?: Record<string, unknown>) => void;
   registerCommand: (cmd: PluginCommandDefinition) => void;
   registerService: (svc: PluginService) => void;
   on: (hookName: string, handler: (...args: any[]) => unknown | Promise<unknown>) => void;

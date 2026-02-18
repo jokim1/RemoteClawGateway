@@ -39,7 +39,8 @@ import {
 import { normalizeSlackBindingScope } from './talks.js';
 import { findOpenClawSlackOwnershipConflicts } from './slack-ownership-doctor.js';
 import { reconcileSlackRoutingForTalks } from './slack-routing-sync.js';
-import { reconcileAnthropicProxyBaseUrls } from './provider-baseurl-sync.js';
+import { reconcileAnthropicProxyBaseUrls, reconcileGatewayResponsesEndpoint } from './provider-baseurl-sync.js';
+import { registerOpenClawNativeGoogleTools } from './openclaw-native-tools.js';
 
 // ---------------------------------------------------------------------------
 // Node.js 25 fetch fix — replace built-in undici connector to fix Tailscale IP
@@ -455,6 +456,10 @@ const plugin = {
       const message = err instanceof Error ? err.message : String(err);
       api.logger.warn(`ClawTalk: failed to reconcile Anthropic baseUrl: ${message}`);
     });
+    void reconcileGatewayResponsesEndpoint(api.logger).catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      api.logger.warn(`ClawTalk: failed to reconcile responses endpoint config: ${message}`);
+    });
 
     // Eagerly warm up the usage loader in background
     warmUsageLoader(api.logger);
@@ -528,6 +533,11 @@ const plugin = {
     // Initialize tool registry and executor
     const toolRegistry = new ToolRegistry(pluginCfg.dataDir, api.logger);
     const toolExecutor = new ToolExecutor(toolRegistry, api.logger);
+    registerOpenClawNativeGoogleTools({
+      api,
+      executor: toolExecutor,
+      logger: api.logger,
+    });
 
     // Register job scheduler as a managed service
     let stopScheduler: (() => void) | null = null;

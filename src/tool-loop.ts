@@ -12,6 +12,7 @@
  */
 
 import type { ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { Agent } from 'undici';
 import type { Logger, ToolCallInfo } from './types.js';
 import type { ToolRegistry, ToolDefinition } from './tool-registry.js';
@@ -188,6 +189,8 @@ export interface ToolLoopStreamOptions {
   defaultGoogleAuthProfile?: string;
   /** Optional callback for user-visible status updates. */
   onStatus?: (payload: { code: string; message: string; level?: 'info' | 'warn' | 'error'; meta?: Record<string, unknown> }) => void;
+  /** Transport for upstream OpenClaw call. */
+  transport?: 'chat_completions' | 'responses';
 }
 
 export interface ToolLoopStreamResult {
@@ -201,6 +204,9 @@ export interface ToolLoopStreamResult {
  * executes tool calls, and loops until done or max iterations.
  */
 export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoopStreamResult> {
+  if (opts.transport === 'responses') {
+    return runToolLoopResponses(opts);
+  }
   const { messages, model, tools, gatewayOrigin, authToken, extraHeaders, res, executor, logger, clientSignal, traceId } = opts;
   let fullContent = '';
   let responseModel: string | undefined;
@@ -603,6 +609,199 @@ export async function runToolLoop(opts: ToolLoopStreamOptions): Promise<ToolLoop
   }
 
   return { fullContent, responseModel, toolCallMessages };
+}
+
+type ResponsesInputItem =
+  | { type: 'message'; role: 'system' | 'developer' | 'user' | 'assistant'; content: string }
+  | { type: 'function_call'; id?: string; call_id?: string; name: string; arguments: string }
+  | { type: 'function_call_output'; call_id: string; output: string };
+
+function toResponsesInput(messages: ToolLoopStreamOptions['messages']): ResponsesInputItem[] {
+  const out: ResponsesInputItem[] = [];
+  for (const msg of messages) {
+    if (msg.role === 'tool') {
+      const callId = typeof msg.tool_call_id === 'string' ? msg.tool_call_id.trim() : '';
+      if (!callId) continue;
+      out.push({
+        type: 'function_call_output',
+        call_id: callId,
+        output: typeof msg.content === 'string' ? msg.content : String(msg.content ?? ''),
+      });
+      continue;
+    }
+
+    if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+      const assistantText = typeof msg.content === 'string' ? msg.content.trim() : '';
+      if (assistantText) {
+        out.push({ type: 'message', role: 'assistant', content: assistantText });
+      }
+      for (const call of msg.tool_calls) {
+        const fn = (call as any)?.function;
+        const name = typeof fn?.name === 'string' ? fn.name.trim() : '';
+        const args = typeof fn?.arguments === 'string' ? fn.arguments : JSON.stringify(fn?.arguments ?? {});
+        const id = typeof (call as any)?.id === 'string' ? (call as any).id : undefined;
+        if (!name) continue;
+        out.push({
+          type: 'function_call',
+          ...(id ? { id } : {}),
+          ...(id ? { call_id: id } : {}),
+          name,
+          arguments: args,
+        });
+      }
+      continue;
+    }
+
+    const role = msg.role === 'system' || msg.role === 'developer' || msg.role === 'assistant' || msg.role === 'user'
+      ? msg.role
+      : undefined;
+    if (!role) continue;
+    const content = typeof msg.content === 'string' ? msg.content : String(msg.content ?? '');
+    out.push({ type: 'message', role, content });
+  }
+  return out;
+}
+
+async function runToolLoopResponses(opts: ToolLoopStreamOptions): Promise<ToolLoopStreamResult> {
+  const { messages, model, tools, gatewayOrigin, authToken, extraHeaders, res, executor, logger, clientSignal, traceId } = opts;
+  let fullContent = '';
+  let responseModel: string | undefined;
+  const toolCallMessages: ToolLoopStreamResult['toolCallMessages'] = [];
+  const iterationLimit = Math.max(1, Math.min(opts.maxIterations ?? MAX_ITERATIONS, MAX_ITERATIONS));
+
+  const inactivityMs = opts.timeoutMs ?? LOOP_INACTIVITY_MS;
+  const maxMs = Math.min(opts.maxTotalMs ?? inactivityMs * 6, LOOP_MAX_MS);
+  const abort = createActivityAbort(inactivityMs, maxMs);
+  const fetchSignal = clientSignal ? AbortSignal.any([abort.signal, clientSignal]) : abort.signal;
+
+  const keepalive = setInterval(() => {
+    if (!res.writableEnded && !clientSignal?.aborted) {
+      res.write(': keepalive\n\n');
+      abort.touch();
+    }
+  }, KEEPALIVE_INTERVAL_MS);
+
+  try {
+    for (let iteration = 0; iteration < iterationLimit; iteration++) {
+      if (clientSignal?.aborted) throw new Error('Client disconnected');
+      opts.onStatus?.({
+        code: 'LLM_REQUEST_STARTED',
+        message: `Calling model ${model} (iteration ${iteration + 1}, attempt 1)...`,
+        level: 'info',
+        meta: { model, iteration: iteration + 1, attempt: 1 },
+      });
+
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+      if (extraHeaders) {
+        for (const [key, value] of Object.entries(extraHeaders)) {
+          if (typeof value === 'string' && value.trim().length > 0) headers[key] = value;
+        }
+      }
+
+      const response = await fetch(`${gatewayOrigin}/v1/responses`, {
+        method: 'POST',
+        headers,
+        signal: fetchSignal,
+        body: JSON.stringify({
+          model,
+          input: toResponsesInput(messages),
+          tools: tools.map((tool) => ({
+            type: 'function',
+            function: {
+              name: tool.function.name,
+              ...(tool.function.description ? { description: tool.function.description } : {}),
+              ...(tool.function.parameters ? { parameters: tool.function.parameters } : {}),
+            },
+          })),
+          tool_choice: opts.toolChoice === 'none' ? 'none' : 'auto',
+          stream: false,
+        }),
+      });
+      abort.touch();
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        throw new Error(`LLM error (${response.status}): ${errText.slice(0, 500)}`);
+      }
+      const data = await response.json() as any;
+      responseModel = typeof data?.model === 'string' ? data.model : responseModel;
+      logger.info(
+        `ModelRoute trace=${traceId ?? '-'} flow=tool-loop-responses responseModel=${responseModel ?? '-'} iteration=${iteration + 1} attempt=1`,
+      );
+
+      const output = Array.isArray(data?.output) ? data.output : [];
+      const functionCalls = output.filter((item: any) => item?.type === 'function_call' && typeof item?.name === 'string');
+
+      if (functionCalls.length > 0) {
+        const assistantToolCalls = functionCalls.map((call: any) => ({
+          id: String(call.call_id ?? call.id ?? randomUUID()),
+          type: 'function',
+          function: {
+            name: String(call.name),
+            arguments: typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments ?? {}),
+          },
+        }));
+
+        messages.push({
+          role: 'assistant',
+          content: '',
+          tool_calls: assistantToolCalls,
+        });
+        toolCallMessages.push({
+          role: 'assistant',
+          content: '',
+          tool_calls: assistantToolCalls as any,
+        });
+
+        for (const toolCall of assistantToolCalls) {
+          const routed = routeToolCallForExecution(
+            toolCall.function.name,
+            toolCall.function.arguments,
+            opts.defaultGoogleAuthProfile,
+          );
+          const toolResult = await executor.execute(routed.executeName, routed.executeArgsJson);
+          const toolContent = toolResult.content;
+          messages.push({
+            role: 'tool',
+            name: routed.executeName,
+            tool_call_id: toolCall.id,
+            content: toolContent,
+          });
+          toolCallMessages.push({
+            role: 'tool',
+            name: routed.executeName,
+            tool_call_id: toolCall.id,
+            content: toolContent,
+          });
+        }
+        continue;
+      }
+
+      const messageItems = output.filter((item: any) => item?.type === 'message' && item?.role === 'assistant');
+      const text = messageItems.flatMap((item: any) => Array.isArray(item?.content) ? item.content : [])
+        .filter((part: any) => part?.type === 'output_text' && typeof part?.text === 'string')
+        .map((part: any) => String(part.text))
+        .join('');
+      fullContent = text;
+      if (text && !res.writableEnded) {
+        res.write(`data: ${JSON.stringify({
+          choices: [{ delta: { content: text } }],
+          model: responseModel || model,
+        })}\n\n`);
+      }
+      return { fullContent, responseModel, toolCallMessages };
+    }
+
+    return {
+      fullContent: fullContent || 'Reached max iterations without final response.',
+      responseModel,
+      toolCallMessages,
+    };
+  } finally {
+    clearInterval(keepalive);
+    abort.clear();
+  }
 }
 
 // ---------------------------------------------------------------------------

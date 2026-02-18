@@ -182,6 +182,10 @@ export class ToolCatalog {
     return [...(this.managedToolAuthRequirements.get(toolName.toLowerCase()) ?? [])];
   }
 
+  isManagedTool(toolName: string): boolean {
+    return this.managedToolToCatalogId.has(toolName.toLowerCase());
+  }
+
   filterEnabledTools<T extends { name: string }>(tools: T[]): T[] {
     return tools.filter((tool) => this.isToolEnabled(tool.name));
   }

@@ -116,3 +116,32 @@ export async function reconcileAnthropicProxyBaseUrls(proxyPort: number, logger:
     logger.info(`ClawTalk: reconciled Anthropic local baseUrl to ${targetBaseUrl} in ${changedFiles} file(s)`);
   }
 }
+
+function ensureResponsesEndpointEnabled(cfg: Record<string, unknown>): boolean {
+  const gateway = (cfg.gateway && typeof cfg.gateway === 'object')
+    ? cfg.gateway as Record<string, unknown>
+    : (cfg.gateway = {}) as Record<string, unknown>;
+  const http = (gateway.http && typeof gateway.http === 'object')
+    ? gateway.http as Record<string, unknown>
+    : (gateway.http = {}) as Record<string, unknown>;
+  const endpoints = (http.endpoints && typeof http.endpoints === 'object')
+    ? http.endpoints as Record<string, unknown>
+    : (http.endpoints = {}) as Record<string, unknown>;
+  const responses = (endpoints.responses && typeof endpoints.responses === 'object')
+    ? endpoints.responses as Record<string, unknown>
+    : (endpoints.responses = {}) as Record<string, unknown>;
+
+  if (responses.enabled === true) return false;
+  responses.enabled = true;
+  return true;
+}
+
+export async function reconcileGatewayResponsesEndpoint(logger: Logger): Promise<void> {
+  const home = process.env.HOME?.trim();
+  if (!home) return;
+  const openclawConfigPath = path.join(home, '.openclaw', 'openclaw.json');
+  const changed = await patchJsonFile(openclawConfigPath, ensureResponsesEndpointEnabled);
+  if (changed) {
+    logger.info('ClawTalk: enabled gateway.http.endpoints.responses for function-calling passthrough.');
+  }
+}

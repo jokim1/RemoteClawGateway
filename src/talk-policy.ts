@@ -128,6 +128,27 @@ export interface ToolAvailabilityState extends ToolInfo {
   reason?: string;
 }
 
+function parseBooleanFlag(raw: unknown): boolean | undefined {
+  if (typeof raw === 'boolean') return raw;
+  if (typeof raw !== 'string') return undefined;
+  const value = raw.trim().toLowerCase();
+  if (!value) return undefined;
+  if (value === '1' || value === 'true' || value === 'yes' || value === 'on') return true;
+  if (value === '0' || value === 'false' || value === 'no' || value === 'off') return false;
+  return undefined;
+}
+
+export function resolveProxyGatewayToolsEnabled(raw: unknown): boolean {
+  const parsed = parseBooleanFlag(raw);
+  // Default on so full_control remains functional unless explicitly disabled.
+  return parsed !== false;
+}
+
+export function resolveOpenClawNativeGoogleToolsEnabled(raw: unknown): boolean {
+  const parsed = parseBooleanFlag(raw);
+  return parsed !== false;
+}
+
 function deriveToolBlockedReason(
   toolName: string,
   executionMode: ExecutionMode,
@@ -136,11 +157,17 @@ function deriveToolBlockedReason(
   toolMode: 'off' | 'confirm' | 'auto',
   allowSet: Set<string>,
   denySet: Set<string>,
-  isInstalled?: (toolName: string) => boolean,
-  isAuthReady?: (toolName: string) => { ready: boolean; reason?: string } | undefined,
+  options?: {
+    isInstalled?: (toolName: string) => boolean;
+    isAuthReady?: (toolName: string) => { ready: boolean; reason?: string } | undefined;
+    isManagedTool?: (toolName: string) => boolean;
+    proxyGatewayToolsEnabled?: boolean;
+    isOpenClawNativeTool?: (toolName: string) => boolean;
+    openClawNativeToolsEnabled?: boolean;
+  },
 ): { code: ToolBlockedReasonCode; reason: string } | null {
   const key = toolName.toLowerCase();
-  if (isInstalled && !isInstalled(key)) {
+  if (options?.isInstalled && !options.isInstalled(key)) {
     return {
       code: 'blocked_not_installed',
       reason: 'Not installed in Tool Catalog.',
@@ -153,9 +180,23 @@ function deriveToolBlockedReason(
     return { code: 'blocked_allowlist', reason: 'Not included in Talk allow-list.' };
   }
   if (executionMode === 'openclaw') {
+    const nativeEnabled = options?.openClawNativeToolsEnabled === true;
+    const isNativeTool = options?.isOpenClawNativeTool ? options.isOpenClawNativeTool(key) : false;
+    if (nativeEnabled && isNativeTool) {
+      // Native OpenClaw bridge can execute this tool directly in embedded mode.
+    } else {
     return {
       code: 'blocked_execution_mode',
       reason: 'Blocked by Execution Mode: OpenClaw Agent uses native OpenClaw tools only.',
+    };
+    }
+  }
+  const proxyGatewayToolsEnabled = options?.proxyGatewayToolsEnabled === true;
+  const isManagedTool = options?.isManagedTool ? options.isManagedTool(key) : false;
+  if (executionMode === 'full_control' && isManagedTool && !proxyGatewayToolsEnabled) {
+    return {
+      code: 'blocked_execution_mode',
+      reason: 'Blocked by Execution Mode: ClawTalk Proxy tool passthrough is unavailable.',
     };
   }
   if (executionMode === 'full_control' && isBrowserTool(key)) {
@@ -176,8 +217,8 @@ function deriveToolBlockedReason(
       reason: 'Blocked by Network Access: Restricted.',
     };
   }
-  if (isAuthReady) {
-    const authState = isAuthReady(key);
+  if (options?.isAuthReady) {
+    const authState = options.isAuthReady(key);
     if (authState && !authState.ready) {
       return {
         code: 'blocked_auth',
@@ -200,6 +241,10 @@ export function evaluateToolAvailability(
   options?: {
     isInstalled?: (toolName: string) => boolean;
     isAuthReady?: (toolName: string) => { ready: boolean; reason?: string } | undefined;
+    isManagedTool?: (toolName: string) => boolean;
+    proxyGatewayToolsEnabled?: boolean;
+    isOpenClawNativeTool?: (toolName: string) => boolean;
+    openClawNativeToolsEnabled?: boolean;
   },
 ): ToolAvailabilityState[] {
   const executionMode = resolveExecutionMode(talk);
@@ -220,8 +265,14 @@ export function evaluateToolAvailability(
       toolMode,
       allowSet,
       denySet,
-      options?.isInstalled,
-      options?.isAuthReady,
+      {
+        isInstalled: options?.isInstalled,
+        isAuthReady: options?.isAuthReady,
+        isManagedTool: options?.isManagedTool,
+        proxyGatewayToolsEnabled: options?.proxyGatewayToolsEnabled,
+        isOpenClawNativeTool: options?.isOpenClawNativeTool,
+        openClawNativeToolsEnabled: options?.openClawNativeToolsEnabled,
+      },
     );
     if (!blocked) return { ...tool, enabled: true };
     return {

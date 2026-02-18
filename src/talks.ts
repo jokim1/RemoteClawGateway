@@ -37,10 +37,13 @@ import {
   normalizeExecutionModeInput,
   normalizeFilesystemAccessInput,
   normalizeNetworkAccessInput,
+  resolveOpenClawNativeGoogleToolsEnabled,
+  resolveProxyGatewayToolsEnabled,
   resolveExecutionMode,
   resolveFilesystemAccess,
   resolveNetworkAccess,
 } from './talk-policy.js';
+import { isOpenClawNativeGoogleTool } from './openclaw-native-tools.js';
 
 type PlatformBindingsValidationResult =
   | { ok: true; bindings: PlatformBinding[]; ownershipKeys: string[] }
@@ -91,6 +94,28 @@ type CatalogAuthRequirement = {
   ready: boolean;
   message?: string;
 };
+
+function resolveExecutionCapabilities(params: {
+  executionMode: 'openclaw' | 'full_control';
+  openClawNativeToolsEnabled: boolean;
+  proxyGatewayToolsEnabled: boolean;
+}): {
+  openclawNativeToolsAvailable: boolean;
+  directGatewayToolsAvailable: boolean;
+  effectiveToolEngine: 'openclaw_native' | 'gateway_direct' | 'none';
+} {
+  const openclawNativeToolsAvailable = params.openClawNativeToolsEnabled;
+  const directGatewayToolsAvailable = params.proxyGatewayToolsEnabled;
+  const effectiveToolEngine =
+    params.executionMode === 'openclaw'
+      ? (openclawNativeToolsAvailable ? 'openclaw_native' : 'none')
+      : (directGatewayToolsAvailable ? 'gateway_direct' : 'none');
+  return {
+    openclawNativeToolsAvailable,
+    directGatewayToolsAvailable,
+    effectiveToolEngine,
+  };
+}
 
 async function resolveCatalogAuth(requirements: string[] | undefined): Promise<{
   ready: boolean;
@@ -1161,6 +1186,17 @@ async function handleGetTalk(ctx: HandlerContext, store: TalkStore, talkId: stri
   }
   const contextMd = await store.getContextMd(talkId);
   const executionMode = resolveExecutionMode(talk);
+  const proxyGatewayToolsEnabled = resolveProxyGatewayToolsEnabled(
+    process.env.CLAWTALK_PROXY_GATEWAY_TOOLS_ENABLED,
+  );
+  const openClawNativeToolsEnabled = resolveOpenClawNativeGoogleToolsEnabled(
+    process.env.CLAWTALK_OPENCLAW_NATIVE_GOOGLE_TOOLS_ENABLED,
+  );
+  const capabilities = resolveExecutionCapabilities({
+    executionMode,
+    openClawNativeToolsEnabled,
+    proxyGatewayToolsEnabled,
+  });
   sendJson(ctx.res, 200, {
     ...talk,
     executionMode,
@@ -1171,6 +1207,7 @@ async function handleGetTalk(ctx: HandlerContext, store: TalkStore, talkId: stri
     networkAccess: resolveNetworkAccess(talk),
     networkAccessOptions: ['restricted', 'full_outbound'],
     contextMd,
+    capabilities,
   });
 }
 
@@ -1203,6 +1240,12 @@ async function handleGetTalkTools(
     return;
   }
   const catalog = getToolCatalog(ctx.pluginCfg.dataDir, ctx.logger);
+  const proxyGatewayToolsEnabled = resolveProxyGatewayToolsEnabled(
+    process.env.CLAWTALK_PROXY_GATEWAY_TOOLS_ENABLED,
+  );
+  const openClawNativeToolsEnabled = resolveOpenClawNativeGoogleToolsEnabled(
+    process.env.CLAWTALK_OPENCLAW_NATIVE_GOOGLE_TOOLS_ENABLED,
+  );
   const registeredTools = registry?.listTools() ?? [];
   const allTools = registeredTools;
   const googleAuthStatus = await googleDocsAuthStatusForProfile(talk.googleAuthProfile);
@@ -1214,11 +1257,20 @@ async function handleGetTalkTools(
   const effectiveToolStates = evaluateToolAvailability(allTools, talk, {
     isInstalled: (toolName) => catalog.isToolEnabled(toolName),
     isAuthReady,
+    isManagedTool: (toolName) => catalog.isManagedTool(toolName),
+    proxyGatewayToolsEnabled,
+    isOpenClawNativeTool: (toolName) => isOpenClawNativeGoogleTool(toolName),
+    openClawNativeToolsEnabled,
   });
   const enabledTools = effectiveToolStates
     .filter((tool) => tool.enabled)
     .map(({ name, description, builtin }) => ({ name, description, builtin }));
   const executionMode = resolveExecutionMode(talk);
+  const capabilities = resolveExecutionCapabilities({
+    executionMode,
+    openClawNativeToolsEnabled,
+    proxyGatewayToolsEnabled,
+  });
   sendJson(ctx.res, 200, {
     talkId,
     toolMode: talk.toolMode ?? 'auto',
@@ -1235,6 +1287,7 @@ async function handleGetTalkTools(
     availableTools: allTools,
     enabledTools,
     effectiveTools: effectiveToolStates,
+    capabilities,
   });
 }
 
@@ -1309,6 +1362,12 @@ async function handleUpdateTalkTools(
   }
 
   const catalog = getToolCatalog(ctx.pluginCfg.dataDir, ctx.logger);
+  const proxyGatewayToolsEnabled = resolveProxyGatewayToolsEnabled(
+    process.env.CLAWTALK_PROXY_GATEWAY_TOOLS_ENABLED,
+  );
+  const openClawNativeToolsEnabled = resolveOpenClawNativeGoogleToolsEnabled(
+    process.env.CLAWTALK_OPENCLAW_NATIVE_GOOGLE_TOOLS_ENABLED,
+  );
   const registeredTools = registry?.listTools() ?? [];
   const allTools = registeredTools;
   const googleAuthStatus = await googleDocsAuthStatusForProfile(updated.googleAuthProfile);
@@ -1320,11 +1379,20 @@ async function handleUpdateTalkTools(
   const effectiveToolStates = evaluateToolAvailability(allTools, updated, {
     isInstalled: (toolName) => catalog.isToolEnabled(toolName),
     isAuthReady,
+    isManagedTool: (toolName) => catalog.isManagedTool(toolName),
+    proxyGatewayToolsEnabled,
+    isOpenClawNativeTool: (toolName) => isOpenClawNativeGoogleTool(toolName),
+    openClawNativeToolsEnabled,
   });
   const enabledTools = effectiveToolStates
     .filter((tool) => tool.enabled)
     .map(({ name, description, builtin }) => ({ name, description, builtin }));
   const executionModeResolved = resolveExecutionMode(updated);
+  const capabilities = resolveExecutionCapabilities({
+    executionMode: executionModeResolved,
+    openClawNativeToolsEnabled,
+    proxyGatewayToolsEnabled,
+  });
   sendJson(ctx.res, 200, {
     talkId,
     toolMode: updated.toolMode ?? 'auto',
@@ -1341,6 +1409,7 @@ async function handleUpdateTalkTools(
     availableTools: allTools,
     enabledTools,
     effectiveTools: effectiveToolStates,
+    capabilities,
   });
 }
 

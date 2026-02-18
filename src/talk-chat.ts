@@ -26,9 +26,12 @@ import {
   evaluateToolAvailability,
   isBrowserIntent,
   isBrowserTool,
+  resolveOpenClawNativeGoogleToolsEnabled,
+  resolveProxyGatewayToolsEnabled,
   resolveExecutionMode,
 } from './talk-policy.js';
 import { isTransientError } from './tool-loop.js';
+import { isOpenClawNativeGoogleTool } from './openclaw-native-tools.js';
 
 /** Maximum number of history messages to include in LLM context. */
 const MAX_CONTEXT_MESSAGES = 50;
@@ -508,6 +511,12 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
       || (talkToolMode === 'confirm' && explicitToolApproval)
     );
   const catalog = getToolCatalog(dataDir, logger);
+  const proxyGatewayToolsEnabled = resolveProxyGatewayToolsEnabled(
+    process.env.CLAWTALK_PROXY_GATEWAY_TOOLS_ENABLED,
+  );
+  const openClawNativeToolsEnabled = resolveOpenClawNativeGoogleToolsEnabled(
+    process.env.CLAWTALK_OPENCLAW_NATIVE_GOOGLE_TOOLS_ENABLED,
+  );
   const globallyEnabledTools = catalog.filterEnabledTools(registry.listTools());
   const prePolicyToolInfos = filterToolInfos(
     globallyEnabledTools,
@@ -526,7 +535,12 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     getToolRequiredAuth: (toolName) => catalog.getToolRequiredAuth(toolName),
   });
   const policyStatesWithAuth = evaluateToolAvailability(prePolicyToolInfos, meta, {
+    isInstalled: (toolName) => catalog.isToolEnabled(toolName),
     isAuthReady,
+    isManagedTool: (toolName) => catalog.isManagedTool(toolName),
+    proxyGatewayToolsEnabled,
+    isOpenClawNativeTool: (toolName) => isOpenClawNativeGoogleTool(toolName),
+    openClawNativeToolsEnabled,
   });
   const policyFilteredToolInfos = policyStatesWithAuth
     .filter((tool) => tool.enabled)
@@ -941,11 +955,17 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   });
   const resolvedHeaderAgentId = routing.headerAgentId
     ?? inboundAgentId;
+  const routedFallbackAgentId =
+    routeDiag.matchedRequestedModelAgentId
+    ?? routeDiag.configuredAgentId
+    ?? routeDiag.defaultAgentId
+    ?? undefined;
   // Keep `agent:<id>` stable and real so OpenClaw resolves workspace/identity correctly.
   // Use a separate lane suffix for per-run isolation.
   const resolvedSessionAgentId =
     resolvedHeaderAgentId?.trim()
     || inboundAgentId
+    || routedFallbackAgentId
     || CLAWTALK_DEFAULT_AGENT_ID;
   const sessionRoutePart = resolvedSessionAgentId;
   const runScopedSessionPart = buildRunScopedSessionPart(
@@ -953,18 +973,13 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     model,
     traceId,
   );
-  const sessionKey = (() => {
-    if (talkExecutionMode === 'full_control') {
-      // No `agent:` prefix — keeps request in transparent LLM-proxy mode so
-      // gateway tools are callable instead of being replaced by OpenClaw agent tools.
-      return buildFullControlTalkSessionKey(talkId, runScopedSessionPart);
-    }
-    return buildTalkSessionKey(talkId, resolvedSessionAgentId, runScopedSessionPart);
-  })();
   const extraHeaders: Record<string, string> = {
-    'x-openclaw-session-key': sessionKey,
     'x-openclaw-trace-id': traceId,
   };
+  if (talkExecutionMode !== 'full_control') {
+    const sessionKey = buildTalkSessionKey(talkId, resolvedSessionAgentId, runScopedSessionPart);
+    extraHeaders['x-openclaw-session-key'] = sessionKey;
+  }
   // In full_control mode, suppress agent-id header so OpenClaw doesn't activate
   // its embedded agent. Model routing happens via the `model` param instead.
   if (talkExecutionMode !== 'full_control' && resolvedHeaderAgentId?.trim()) {
@@ -1046,6 +1061,9 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
       maxIterations,
       toolChoice: disableTools ? 'none' : 'auto',
       defaultGoogleAuthProfile: meta.googleAuthProfile,
+      // Use chat completions for both execution modes to preserve
+      // explicit function-calling tool schema behavior.
+      transport: 'chat_completions',
       onStatus: (status) => emitStatusEvent(res, status),
     });
 
