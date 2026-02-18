@@ -54,6 +54,8 @@ const BROWSER_INTENT_RE =
   /\b(browser|tab|chrome|take over|control (my )?browser|attach(ed)? tab|openclaw browser relay)\b/i;
 const BROWSER_INTENT_NEGATION_RE =
   /\b(?:without|rather than|instead of|avoid|skip|do not|don't|dont|not)\s+(?:using\s+|use\s+)?(?:the\s+)?(?:browser|chrome|tabs?|openclaw browser relay)\b/i;
+const GOOGLE_DOCS_TAB_INTENT_RE =
+  /\bgoogle\s+doc(s)?\b.*\btab(s)?\b|\btab(s)?\b.*\bgoogle\s+doc(s)?\b/i;
 
 export function normalizeExecutionModeInput(raw: unknown): ExecutionMode | undefined {
   if (typeof raw !== 'string') return undefined;
@@ -105,6 +107,8 @@ export function executionModeLabel(mode: ExecutionMode): ExecutionModeLabel {
 
 export function isBrowserIntent(message: string): boolean {
   if (BROWSER_INTENT_NEGATION_RE.test(message)) return false;
+  // "Google Doc tab" should route to google_docs_* tab tools, not browser control.
+  if (GOOGLE_DOCS_TAB_INTENT_RE.test(message)) return false;
   return BROWSER_INTENT_RE.test(message);
 }
 

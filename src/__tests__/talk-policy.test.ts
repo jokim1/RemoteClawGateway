@@ -151,6 +151,11 @@ describe('browser intent detection', () => {
     expect(isBrowserIntent("don't use browser, use google docs api")).toBe(false);
     expect(isBrowserIntent('without browser, create the doc')).toBe(false);
   });
+
+  test('does not treat google docs tab requests as browser intent', () => {
+    expect(isBrowserIntent('create a google doc called test3 and create a new tab in that doc called apple')).toBe(false);
+    expect(isBrowserIntent('in this google docs file add tab Beta')).toBe(false);
+  });
 });
 
 describe('proxy gateway tools flag', () => {

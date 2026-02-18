@@ -181,8 +181,9 @@ function isLikelyActionRequest(message: string): boolean {
   const text = message.trim().toLowerCase();
   if (!text) return false;
   return (
-    /\b(run|execute|install|build|test|debug|fix|patch|edit|create|delete|remove|update)\b/.test(text)
+    /\b(run|execute|install|build|test|debug|fix|patch|edit|create|make|add|delete|remove|update)\b/.test(text)
     || /\b(search|look up|research|fetch|download|upload|open|read|write)\b/.test(text)
+    || /\bgoogle\s+doc(s)?|google\s+drive|tab(s)?\b/.test(text)
     || /\b(file|files|code|command|terminal|shell|api|curl|http|https|json)\b/.test(text)
     || /^\/\w+/.test(text)
     || /```/.test(text)
@@ -228,6 +229,103 @@ function extractDriveListLimit(message: string): number {
 function extractPdfPathFromMessage(message: string): string | undefined {
   const match = message.match(/(\/[^\s\]\)'"`]+\.pdf)\b/i);
   return match?.[1];
+}
+
+function normalizeIntentText(message: string): string {
+  return message
+    // Remove control characters that can break regex matching (e.g. DEL \u007f).
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function splitTabTitles(raw: string): string[] {
+  return raw
+    .replace(/\band\b/gi, ',')
+    .split(',')
+    .map((v) => v
+      .trim()
+      .replace(/^["“]|["”]$/g, '')
+      .replace(/\s+(?:in|to)\s+(?:that|the|this)\s+doc(?:ument)?\b.*$/i, '')
+      .replace(/\s*:\s*https?:\/\/\S+$/i, '')
+      .replace(/\s+https?:\/\/\S+$/i, '')
+      .trim())
+    .filter(Boolean);
+}
+
+function extractGoogleDocCreateIntent(message: string): { title: string; tabTitles?: string[] } | undefined {
+  const text = normalizeIntentText(message);
+  if (!/\bgoogle\s+doc(s|ument)?\b/i.test(text)) return undefined;
+
+  const titleMatch =
+    text.match(/\b(?:called|titled|named)\s+["“]?([^"\n”]+?)["”]?(?=(?:\s+(?:and|with)\s+|\s*$))/i)
+    ?? text.match(/\bcreate\s+(?:a|another)?\s*google\s+doc(?:s|ument)?\s+["“]?([^"\n”]+?)["”]?(?=(?:\s+(?:and|with)\s+|\s*$))/i);
+  const title = titleMatch?.[1]?.trim();
+  if (!title) return undefined;
+
+  const tabListMatch =
+    text.match(/\b(?:create|add|with)\s+(?:an?\s+)?(?:new\s+)?(?:\w+\s+)?tabs?\s+(?:in\s+[^,\n]+?\s+)?(?:called|named|titled)?\s+(.+?)(?=(?:[.?!]|$))/i)
+    ?? text.match(/\btabs?\s+(?:called|named|titled)\s+(.+?)(?=(?:[.?!]|$))/i);
+  const tabMatch =
+    text.match(/\bwith\s+(?:an?\s+)?(?:new\s+)?tab(?:\s+in\s+[^,\n]+?)?\s+(?:called|named|titled)?\s*["“]?([^"\n”]+?)["”]?(?=(?:[.,]|$))/i)
+    ?? text.match(/\bcreate\s+(?:an?\s+)?(?:new\s+)?tab(?:\s+in\s+[^,\n]+?)?\s+(?:called|named|titled)?\s*["“]?([^"\n”]+?)["”]?(?=(?:[.,]|$))/i)
+    ?? text.match(/\btab\s+(?:called|named|titled)\s+["“]?([^"\n”]+?)["”]?(?=(?:[.,]|$))/i);
+  const tabTitles = tabListMatch?.[1]
+    ? splitTabTitles(tabListMatch[1])
+    : (tabMatch?.[1]?.trim() ? [tabMatch[1].trim()] : undefined);
+
+  return { title, ...(tabTitles && tabTitles.length > 0 ? { tabTitles } : {}) };
+}
+
+function extractGoogleDocTabOnlyIntent(message: string): { tabTitles: string[] } | undefined {
+  const text = normalizeIntentText(message);
+  if (!/\btab(s)?\b/i.test(text)) return undefined;
+  const tabListMatch =
+    text.match(/\b(?:create|add|make)\s+(?:an?\s+)?(?:new\s+)?(?:\w+\s+)?tabs?(?:\s+in\s+[^,\n]+?)?\s+(?:called|named|titled)\s+(.+?)(?=(?:[.?!]|$))/i)
+    ?? text.match(/\btabs?\s+(?:called|named|titled)\s+(.+?)(?=(?:[.?!]|$))/i);
+  const tabMatch =
+    text.match(/\b(?:create|add|make)\s+(?:an?\s+)?(?:new\s+)?tab(?:\s+in\s+[^,\n]+?)?\s+(?:called|named|titled)\s+["“]?([^"\n”]+?)["”]?(?=(?:[.?!]|$))/i)
+    ?? text.match(/\btab\s+(?:called|named|titled)\s+["“]?([^"\n”]+?)["”]?(?=(?:[.?!]|$))/i);
+  const tabTitles = tabListMatch?.[1]
+    ? splitTabTitles(tabListMatch[1])
+    : (tabMatch?.[1]?.trim() ? [tabMatch[1].trim()] : []);
+  if (tabTitles.length === 0) return undefined;
+  return { tabTitles };
+}
+
+function extractGoogleDocIdAndUrlFromCreateResult(content: string): { docId?: string; url?: string } {
+  let url: string | undefined;
+  let docId: string | undefined;
+  try {
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    const maybeUrl = typeof parsed.url === 'string'
+      ? parsed.url
+      : (typeof parsed.document_url === 'string' ? parsed.document_url : undefined);
+    const maybeDocId = typeof parsed.doc_id === 'string'
+      ? parsed.doc_id
+      : (typeof parsed.document_id === 'string' ? parsed.document_id : undefined);
+    url = maybeUrl?.trim() || undefined;
+    docId = maybeDocId?.trim() || undefined;
+  } catch {
+    // fall through to regex extraction
+  }
+  if (!url) {
+    const urlMatch = content.match(/https:\/\/docs\.google\.com\/document\/d\/[A-Za-z0-9_-]+\/edit(?:\S*)?/i);
+    url = urlMatch?.[0];
+  }
+  if (!docId && url) {
+    docId = extractGoogleDocsDocumentIdFromUrl(url);
+  }
+  return { docId, url };
+}
+
+function extractMostRecentGoogleDocId(history: TalkMessage[]): string | undefined {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const content = history[i]?.content ?? '';
+    const id = extractGoogleDocsDocumentIdFromUrl(content);
+    if (id) return id;
+  }
+  return undefined;
 }
 
 function prioritizeTurnToolInfos(tools: ToolInfo[], message: string): ToolInfo[] {
@@ -555,6 +653,12 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
   const hasGoogleDocsReadTool = availableToolInfos.some(
     (tool) => tool.name.trim().toLowerCase() === 'google_docs_read',
   );
+  const hasGoogleDocsCreateTool = availableToolInfos.some(
+    (tool) => tool.name.trim().toLowerCase() === 'google_docs_create',
+  );
+  const hasGoogleDocsAddTabTool = availableToolInfos.some(
+    (tool) => tool.name.trim().toLowerCase() === 'google_docs_add_tab',
+  );
   const hasPdfExtractTool = availableToolInfos.some(
     (tool) => tool.name.trim().toLowerCase() === 'pdf_extract_text',
   );
@@ -572,6 +676,167 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     const directReply = driveResult.success
       ? driveResult.content
       : `Google Drive request failed: ${driveResult.content}`;
+
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.write(`event: meta\ndata: ${JSON.stringify({ userMessageId })}\n\n`);
+    res.write(`data: ${JSON.stringify({
+      choices: [{ delta: { content: directReply } }],
+      model,
+    })}\n\n`);
+    await store.appendMessage(talkId, {
+      id: userMessageId,
+      role: 'user',
+      content: body.message,
+      timestamp: Date.now(),
+      ...(body.agentName && { agentName: body.agentName }),
+      ...(body.agentRole && { agentRole: body.agentRole as any }),
+    });
+    await store.appendMessage(talkId, {
+      id: randomUUID(),
+      role: 'assistant',
+      content: directReply,
+      timestamp: Date.now(),
+      model,
+      ...(body.agentName && { agentName: body.agentName }),
+      ...(body.agentRole && { agentRole: body.agentRole as any }),
+    });
+    scheduleContextUpdate({
+      talkId,
+      userMessage: body.message,
+      assistantResponse: directReply,
+      model,
+      gatewayOrigin,
+      authToken,
+      store,
+      logger,
+    });
+    if (!res.writableEnded) {
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }
+    return;
+  }
+
+  // Deterministic Google Docs create(+tab) fast path:
+  // bypass model/tool-chaining for explicit create-doc requests.
+  const createIntent = extractGoogleDocCreateIntent(body.message);
+  if (!isModelQuestion && createIntent && hasGoogleDocsCreateTool) {
+    const userMessageId = randomUUID();
+    const createResult = await executor.execute('google_docs_create', JSON.stringify({
+      title: createIntent.title,
+      ...(meta.googleAuthProfile ? { profile: meta.googleAuthProfile } : {}),
+    }));
+
+    let directReply: string;
+    if (!createResult.success) {
+      directReply = `Google Docs create failed: ${createResult.content}`;
+    } else {
+      const parsed = extractGoogleDocIdAndUrlFromCreateResult(createResult.content);
+      if (createIntent.tabTitles && createIntent.tabTitles.length > 0) {
+        if (!hasGoogleDocsAddTabTool) {
+          directReply = `Created "${createIntent.title}"${parsed.url ? `\n${parsed.url}` : ''}\n\nTabs "${createIntent.tabTitles.join(', ')}" were requested but google_docs_add_tab is not enabled for this turn.`;
+        } else if (!parsed.docId) {
+          directReply = `Created "${createIntent.title}" but could not resolve document ID to add requested tabs.\n\nRaw create result:\n${createResult.content}`;
+        } else {
+          const failedTabs: string[] = [];
+          for (const tabTitle of createIntent.tabTitles) {
+            const tabResult = await executor.execute('google_docs_add_tab', JSON.stringify({
+              doc_id: parsed.docId,
+              title: tabTitle,
+              ...(meta.googleAuthProfile ? { profile: meta.googleAuthProfile } : {}),
+            }));
+            if (!tabResult.success) failedTabs.push(tabTitle);
+          }
+          if (failedTabs.length > 0) {
+            directReply = `Created "${createIntent.title}"${parsed.url ? `\n${parsed.url}` : ''}\n\nFailed to add tab(s): ${failedTabs.join(', ')}`;
+          } else {
+            directReply = `**Created:** ${createIntent.title} with tabs "${createIntent.tabTitles.join(', ')}"${parsed.url ? `\n\n${parsed.url}` : ''}`;
+          }
+        }
+      } else {
+        directReply = parsed.url
+          ? parsed.url
+          : `Created "${createIntent.title}".\n\n${createResult.content}`;
+      }
+    }
+
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.write(`event: meta\ndata: ${JSON.stringify({ userMessageId })}\n\n`);
+    res.write(`data: ${JSON.stringify({
+      choices: [{ delta: { content: directReply } }],
+      model,
+    })}\n\n`);
+    await store.appendMessage(talkId, {
+      id: userMessageId,
+      role: 'user',
+      content: body.message,
+      timestamp: Date.now(),
+      ...(body.agentName && { agentName: body.agentName }),
+      ...(body.agentRole && { agentRole: body.agentRole as any }),
+    });
+    await store.appendMessage(talkId, {
+      id: randomUUID(),
+      role: 'assistant',
+      content: directReply,
+      timestamp: Date.now(),
+      model,
+      ...(body.agentName && { agentName: body.agentName }),
+      ...(body.agentRole && { agentRole: body.agentRole as any }),
+    });
+    scheduleContextUpdate({
+      talkId,
+      userMessage: body.message,
+      assistantResponse: directReply,
+      model,
+      gatewayOrigin,
+      authToken,
+      store,
+      logger,
+    });
+    if (!res.writableEnded) {
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }
+    return;
+  }
+
+  // Deterministic Google Docs add-tab fast path:
+  // supports follow-up requests like "add tabs ... in that doc".
+  const tabOnlyIntent = extractGoogleDocTabOnlyIntent(body.message);
+  if (!isModelQuestion && !createIntent && tabOnlyIntent && hasGoogleDocsAddTabTool) {
+    const userMessageId = randomUUID();
+    let targetDocId = extractGoogleDocsDocumentIdFromUrl(body.message);
+    if (!targetDocId) {
+      const recent = await store.getRecentMessages(talkId, 24);
+      targetDocId = extractMostRecentGoogleDocId(recent);
+    }
+
+    let directReply: string;
+    if (!targetDocId) {
+      directReply = 'Could not determine target Google Doc for tab creation. Include the doc URL and retry.';
+    } else {
+      const failedTabs: string[] = [];
+      for (const tabTitle of tabOnlyIntent.tabTitles) {
+        const tabResult = await executor.execute('google_docs_add_tab', JSON.stringify({
+          doc_id: targetDocId,
+          title: tabTitle,
+          ...(meta.googleAuthProfile ? { profile: meta.googleAuthProfile } : {}),
+        }));
+        if (!tabResult.success) failedTabs.push(tabTitle);
+      }
+      const docUrl = `https://docs.google.com/document/d/${targetDocId}/edit`;
+      directReply = failedTabs.length > 0
+        ? `Added some tabs, but failed: ${failedTabs.join(', ')}\n\n${docUrl}`
+        : `Added tabs "${tabOnlyIntent.tabTitles.join(', ')}"\n\n${docUrl}`;
+    }
 
     res.statusCode = 200;
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
