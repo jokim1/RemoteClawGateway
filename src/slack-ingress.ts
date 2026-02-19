@@ -925,7 +925,11 @@ async function sendSlackReply(params: {
   message: string;
   sessionKey: string;
 }): Promise<void> {
-  const resolvedAccountId = params.accountId ?? params.event.accountId;
+  const resolvedAccountIdRaw = params.accountId ?? params.event.accountId;
+  const resolvedAccountId = resolvedAccountIdRaw?.trim();
+  if (!resolvedAccountId) {
+    throw new Error('slack_account_context_required: Slack send requires a bound account context.');
+  }
   if (params.deps.sendSlackMessage) {
     const sent = await params.deps.sendSlackMessage({
       accountId: resolvedAccountId,

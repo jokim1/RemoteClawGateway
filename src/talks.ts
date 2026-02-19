@@ -45,6 +45,7 @@ import {
   resolveNetworkAccess,
 } from './talk-policy.js';
 import { isOpenClawNativeGoogleTool } from './openclaw-native-tools.js';
+import { listSlackAccountIds, resolveSlackBotTokenForAccount } from './slack-auth.js';
 
 type PlatformBindingsValidationResult =
   | { ok: true; bindings: PlatformBinding[]; ownershipKeys: string[] }
@@ -433,45 +434,6 @@ export function normalizeSlackBindingScope(scope: string): string | null {
   }
 
   return null;
-}
-
-function resolveTemplateSecret(raw: string | undefined): string | undefined {
-  if (!raw) return undefined;
-  const trimmed = raw.trim();
-  if (!trimmed) return undefined;
-  const envMatch = trimmed.match(/^\$\{(.+)\}$/);
-  if (envMatch?.[1]) {
-    const fromEnv = process.env[envMatch[1]];
-    return fromEnv?.trim() ? fromEnv.trim() : undefined;
-  }
-  return trimmed;
-}
-
-function listSlackAccountIds(cfg: Record<string, any>): string[] {
-  const accounts = cfg?.channels?.slack?.accounts;
-  if (!accounts || typeof accounts !== 'object') {
-    return [DEFAULT_SLACK_ACCOUNT_ID];
-  }
-  const ids = Object.keys(accounts).filter(Boolean);
-  if (ids.length === 0) return [DEFAULT_SLACK_ACCOUNT_ID];
-  if (ids.includes(DEFAULT_SLACK_ACCOUNT_ID)) {
-    return [DEFAULT_SLACK_ACCOUNT_ID, ...ids.filter((id) => id !== DEFAULT_SLACK_ACCOUNT_ID).sort()];
-  }
-  return ids.sort();
-}
-
-function resolveSlackBotTokenForAccount(cfg: Record<string, any>, accountId: string): string | undefined {
-  const accountRaw: string | undefined = cfg?.channels?.slack?.accounts?.[accountId]?.botToken;
-  const accountToken = resolveTemplateSecret(accountRaw);
-  if (accountToken) return accountToken;
-
-  if (accountId === DEFAULT_SLACK_ACCOUNT_ID) {
-    const topLevelToken = resolveTemplateSecret(cfg?.channels?.slack?.botToken);
-    if (topLevelToken) return topLevelToken;
-    const envToken = resolveTemplateSecret(process.env.SLACK_BOT_TOKEN);
-    if (envToken) return envToken;
-  }
-  return undefined;
 }
 
 function normalizeAccountId(value: string | undefined): string | undefined {

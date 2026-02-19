@@ -41,6 +41,7 @@ import { findOpenClawSlackOwnershipConflicts } from './slack-ownership-doctor.js
 import { reconcileSlackRoutingForTalks } from './slack-routing-sync.js';
 import { reconcileAnthropicProxyBaseUrls, reconcileGatewayResponsesEndpoint } from './provider-baseurl-sync.js';
 import { registerOpenClawNativeGoogleTools } from './openclaw-native-tools.js';
+import { listSlackAccountIds, resolveSlackBotTokenForAccount } from './slack-auth.js';
 
 // ---------------------------------------------------------------------------
 // Node.js 25 fetch fix — replace built-in undici connector to fix Tailscale IP
@@ -210,28 +211,8 @@ function normalizeSlackResolveScope(channelIdRaw: string): string | null {
   return normalizeSlackBindingScope(`channel:${channelId}`);
 }
 
-function resolveTemplateSecret(raw: string | undefined): string | undefined {
-  if (!raw) return undefined;
-  const trimmed = raw.trim();
-  if (!trimmed) return undefined;
-  const envMatch = trimmed.match(/^\$\{(.+)\}$/);
-  if (envMatch?.[1]) {
-    const value = process.env[envMatch[1]]?.trim();
-    return value || undefined;
-  }
-  return trimmed;
-}
-
 function resolveSlackBotTokenForDiscovery(cfg: Record<string, any>, accountId: string): string | undefined {
-  const accountToken = resolveTemplateSecret(cfg?.channels?.slack?.accounts?.[accountId]?.botToken);
-  if (accountToken) return accountToken;
-  if (accountId === 'default') {
-    return (
-      resolveTemplateSecret(cfg?.channels?.slack?.botToken) ??
-      resolveTemplateSecret(process.env.SLACK_BOT_TOKEN)
-    );
-  }
-  return undefined;
+  return resolveSlackBotTokenForAccount(cfg, accountId);
 }
 
 function listSlackAccountOptions(cfg: Record<string, any>): Array<{
@@ -239,18 +220,9 @@ function listSlackAccountOptions(cfg: Record<string, any>): Array<{
   isDefault: boolean;
   hasBotToken: boolean;
 }> {
-  const accountsRoot = cfg?.channels?.slack?.accounts;
-  const ids = new Set<string>();
-  if (accountsRoot && typeof accountsRoot === 'object') {
-    for (const key of Object.keys(accountsRoot)) {
-      const id = key.trim().toLowerCase();
-      if (id) ids.add(id);
-    }
-  }
-
-  if (resolveSlackBotTokenForDiscovery(cfg, 'default')) {
-    ids.add('default');
-  }
+  const ids = new Set<string>(
+    listSlackAccountIds(cfg).map((id) => id.trim().toLowerCase()).filter(Boolean),
+  );
   if (ids.size === 0) {
     ids.add('default');
   }
@@ -359,23 +331,6 @@ function collectTalkSlackChannelHints(params: {
 // ============================================================================
 
 /**
- * Resolve the Slack bot token for a given account from the OpenClaw config.
- * Config values use template syntax like "${SLACK_KIMFAMILY_BOT_TOKEN}".
- */
-function resolveSlackBotToken(cfg: Record<string, any>, accountId: string): string | undefined {
-  const raw: string | undefined = cfg?.channels?.slack?.accounts?.[accountId]?.botToken;
-  if (!raw) return undefined;
-
-  // Resolve ${ENV_VAR} template
-  const envMatch = raw.match(/^\$\{(.+)\}$/);
-  if (envMatch) {
-    return process.env[envMatch[1]] ?? undefined;
-  }
-
-  return raw;
-}
-
-/**
  * Create a replyToEvent callback that delivers messages to platforms.
  * Currently supports Slack via chat.postMessage.
  */
@@ -390,12 +345,12 @@ function createEventReplyHandler(
     }
 
     if (!target.platformChannelId || !target.accountId) {
-      logger.warn('EventReply: missing channelId or accountId');
+      logger.warn('EventReply: slack_account_context_required (missing channelId or accountId)');
       return false;
     }
 
     const cfg = getConfig();
-    const botToken = resolveSlackBotToken(cfg, target.accountId);
+    const botToken = resolveSlackBotTokenForAccount(cfg, target.accountId);
     if (!botToken) {
       logger.warn(`EventReply: no bot token for Slack account "${target.accountId}"`);
       return false;
