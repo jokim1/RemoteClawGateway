@@ -1035,7 +1035,7 @@ async function sendSlackReply(params: {
   if (!resolvedAccountId) {
     throw new Error('slack_account_context_required: Slack send requires a bound account context.');
   }
-  const deliveryMode = params.deliveryMode ?? 'thread';
+  const deliveryMode = params.deliveryMode ?? 'adaptive';
   const shouldReplyInThread =
     deliveryMode === 'thread'
       ? Boolean(params.event.threadTs)
