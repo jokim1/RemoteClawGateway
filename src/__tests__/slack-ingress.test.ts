@@ -550,6 +550,95 @@ describe('slack ingress ownership hooks', () => {
     }
   });
 
+  it('supports adaptive explicit routing hints: thread/channel directives override intent routing', async () => {
+    const talk = store.createTalk('test-model');
+    const bindingId = 'binding-adaptive-explicit';
+    store.updateTalk(talk.id, {
+      platformBindings: [{
+        id: bindingId,
+        platform: 'slack',
+        accountId: 'kimfamily',
+        scope: 'channel:c898',
+        permission: 'read+write',
+        createdAt: Date.now(),
+      }],
+      platformBehaviors: [{
+        id: 'behavior-adaptive-explicit',
+        platformBindingId: bindingId,
+        responseMode: 'all',
+        deliveryMode: 'adaptive',
+        responsePolicy: { triggerPolicy: 'advice_or_study' },
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }],
+    });
+
+    const sendSlackMessage = jest.fn(async (_params: { accountId?: string; channelId: string; threadTs?: string; message: string }) => true);
+    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: 'ack' } }],
+      }),
+    } as unknown as Response);
+    try {
+      const deps = {
+        ...buildDeps(),
+        autoProcessQueue: true,
+        sendSlackMessage,
+      };
+
+      await handleSlackMessageReceivedHook(
+        {
+          from: 'slack:channel:C898',
+          content: '2h study update, reply in thread please',
+          metadata: {
+            to: 'channel:C898',
+            threadId: '1700000199.100',
+            messageId: '1700000199.100',
+            senderId: 'U898',
+            senderName: 'Asher',
+          },
+        },
+        {
+          channelId: 'slack',
+          accountId: 'kimfamily',
+        },
+        deps,
+      );
+
+      await handleSlackMessageReceivedHook(
+        {
+          from: 'slack:channel:C898',
+          content: 'can you help me plan tomorrow? post top-level',
+          metadata: {
+            to: 'channel:C898',
+            threadId: '1700000200.100',
+            messageId: '1700000200.100',
+            senderId: 'U898',
+            senderName: 'Asher',
+          },
+        },
+        {
+          channelId: 'slack',
+          accountId: 'kimfamily',
+        },
+        deps,
+      );
+
+      for (let i = 0; i < 50 && sendSlackMessage.mock.calls.length < 2; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      expect(sendSlackMessage.mock.calls.length).toBeGreaterThanOrEqual(2);
+      const firstCall = sendSlackMessage.mock.calls[0]?.[0] as { threadTs?: string } | undefined;
+      const secondCall = sendSlackMessage.mock.calls[1]?.[0] as { threadTs?: string } | undefined;
+      expect(firstCall?.threadTs).toBe('1700000199.100');
+      expect(secondCall?.threadTs).toBeUndefined();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('respects study_entries_only trigger policy and skips non-study chatter', async () => {
     const talk = store.createTalk('test-model');
     const bindingId = 'binding-trigger-policy';

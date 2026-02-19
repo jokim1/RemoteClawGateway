@@ -744,6 +744,26 @@ function resolveMessageIntent(eventText: string): 'study' | 'advice' | 'other' {
   return 'other';
 }
 
+function resolveExplicitDeliveryPreference(eventText: string): 'thread' | 'channel' | undefined {
+  const text = eventText.toLowerCase();
+  if (!text.trim()) return undefined;
+
+  const wantsThread =
+    /\breply\s+(in|via)\s+(the\s+)?thread\b/.test(text) ||
+    /\brespond\s+(in|via)\s+(the\s+)?thread\b/.test(text) ||
+    /\buse\s+(the\s+)?thread\b/.test(text);
+  if (wantsThread) return 'thread';
+
+  const wantsChannel =
+    /\bpost\s+(it\s+)?(in|to)\s+(the\s+)?channel\b/.test(text) ||
+    /\bpost\s+(top[- ]?level)\b/.test(text) ||
+    /\bdo\s+not\s+reply\b/.test(text) ||
+    /\bno\s+thread\s+reply\b/.test(text);
+  if (wantsChannel) return 'channel';
+
+  return undefined;
+}
+
 function shouldHandleViaBehavior(
   meta: TalkMeta,
   bindingId: string,
@@ -1036,11 +1056,20 @@ async function sendSlackReply(params: {
     throw new Error('slack_account_context_required: Slack send requires a bound account context.');
   }
   const deliveryMode = params.deliveryMode ?? 'adaptive';
+  const explicitDelivery = deliveryMode === 'adaptive'
+    ? resolveExplicitDeliveryPreference(params.event.text)
+    : undefined;
   const shouldReplyInThread =
     deliveryMode === 'thread'
       ? Boolean(params.event.threadTs)
       : deliveryMode === 'adaptive'
-        ? (params.intent === 'advice' && Boolean(params.event.threadTs))
+        ? (
+            explicitDelivery === 'thread'
+              ? Boolean(params.event.threadTs)
+              : explicitDelivery === 'channel'
+                ? false
+                : (params.intent === 'advice' && Boolean(params.event.threadTs))
+          )
         : false;
   const threadTs = shouldReplyInThread ? params.event.threadTs : undefined;
 
