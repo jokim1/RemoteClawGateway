@@ -69,7 +69,7 @@ export class ToolExecutor {
     if (!resolved.ok) {
       return {
         ok: false,
-        content: `STATE_STREAM_REQUIRED: ${resolved.message}`,
+        content: `${resolved.code}: ${resolved.message}`,
       };
     }
     return resolved;

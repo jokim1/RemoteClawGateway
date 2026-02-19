@@ -86,6 +86,31 @@ describe('Talk CRUD', () => {
     expect(updated!.updatedAt).toBeGreaterThanOrEqual(talk.updatedAt);
   });
 
+  it('opens and deduplicates diagnostics by assumption key', async () => {
+    const talk = store.createTalk();
+    const first = store.openDiagnostic(talk.id, {
+      code: 'STATE_STREAM_REQUIRED',
+      category: 'state',
+      title: 'State stream required',
+      message: 'Stream missing',
+      assumptionKey: 'state:stream_required',
+    });
+    const second = store.openDiagnostic(talk.id, {
+      code: 'STATE_STREAM_REQUIRED',
+      category: 'state',
+      title: 'State stream required',
+      message: 'Stream missing again',
+      assumptionKey: 'state:stream_required',
+    });
+    expect(first).not.toBeNull();
+    expect(first?.created).toBe(true);
+    expect(second).not.toBeNull();
+    expect(second?.created).toBe(false);
+    const diagnostics = store.listDiagnostics(talk.id);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].occurrences).toBe(2);
+  });
+
   it('persists directives, platform bindings, and platform behaviors via updateTalk', () => {
     const talk = store.createTalk();
     const now = Date.now();
@@ -710,12 +735,12 @@ describe('Structured talk state', () => {
     expect(reloaded!.timezone).toBe('Asia/Kolkata');
   });
 
-  it('resolveStateStream requires explicit or talk default stream', () => {
+  it('resolveStateStream falls back to default stream for stream_store talks', () => {
     const talk = store.createTalk();
-    const missing = store.resolveStateStream(talk.id);
-    expect(missing.ok).toBe(false);
-    if (!missing.ok) {
-      expect(missing.code).toBe('STATE_STREAM_REQUIRED');
+    const fallbackDefault = store.resolveStateStream(talk.id);
+    expect(fallbackDefault.ok).toBe(true);
+    if (fallbackDefault.ok) {
+      expect(fallbackDefault.stream).toBe('default');
     }
 
     store.updateTalk(talk.id, { defaultStateStream: 'study_tracker' });
@@ -729,6 +754,16 @@ describe('Structured talk state', () => {
     expect(explicit.ok).toBe(true);
     if (explicit.ok) {
       expect(explicit.stream).toBe('d1_retention');
+    }
+  });
+
+  it('blocks stream tools when state backend is workspace_files', () => {
+    const talk = store.createTalk();
+    store.updateTalk(talk.id, { stateBackend: 'workspace_files' });
+    const resolved = store.resolveStateStream(talk.id);
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) {
+      expect(resolved.code).toBe('STATE_BACKEND_WORKSPACE_FILES');
     }
   });
 });

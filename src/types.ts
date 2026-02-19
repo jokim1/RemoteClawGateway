@@ -334,6 +334,25 @@ export interface TalkStateSnapshot {
   policy: TalkStatePolicy;
 }
 
+export type TalkDiagnosticStatus = 'open' | 'resolved' | 'dismissed';
+export type TalkDiagnosticCategory = 'state' | 'filesystem' | 'tools' | 'routing' | 'slack' | 'other';
+
+export interface TalkDiagnosticIssue {
+  id: string;
+  code: string;
+  category: TalkDiagnosticCategory;
+  title: string;
+  message: string;
+  status: TalkDiagnosticStatus;
+  assumptionKey?: string;
+  details?: Record<string, unknown>;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  occurrences: number;
+  resolvedAt?: number;
+  dismissedAt?: number;
+}
+
 export interface TalkMeta {
   id: string;
   /** Monotonic gateway-authoritative metadata version for optimistic concurrency control. */
@@ -361,8 +380,11 @@ export interface TalkMeta {
   toolsDeny?: string[];
   /** Optional Google OAuth profile name for Google Docs/Drive tool calls in this talk. */
   googleAuthProfile?: string;
+  /** Default state persistence backend policy for state_* operations. */
+  stateBackend?: 'stream_store' | 'workspace_files';
   /** Optional default stream name used by state_* tools when stream is omitted. */
   defaultStateStream?: string;
+  diagnostics?: TalkDiagnosticIssue[];
   pinnedMessageIds: string[];
   jobs: TalkJob[];
   agents?: TalkAgent[];

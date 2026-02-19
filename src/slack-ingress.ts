@@ -659,6 +659,20 @@ function resolveOwnerTalk(
   }
 
   if (candidates.length === 0) {
+    const slackBindingScores: string[] = [];
+    for (const talk of talks) {
+      for (const binding of talk.platformBindings ?? []) {
+        if (binding.platform.trim().toLowerCase() !== 'slack') continue;
+        const score = scoreSlackBinding(binding, event);
+        slackBindingScores.push(
+          `${talk.id}:${binding.id}:scope=${binding.scope}:acct=${binding.accountId ?? '-'}:perm=${binding.permission}:score=${score}`,
+        );
+      }
+    }
+    logger.debug(
+      `SlackIngress: no-binding diagnostics event=${event.eventId} account=${event.accountId ?? '-'} ` +
+      `channel=${event.channelId} target=${event.outboundTarget ?? '-'} bindings=[${slackBindingScores.join(' | ')}]`,
+    );
     return { reason: 'no-binding' };
   }
   if (candidates.length > 1) {
@@ -806,6 +820,70 @@ function inferErrorCode(err: unknown): string {
   return 'error';
 }
 
+function mapFailureToDiagnostic(err: unknown): {
+  code: string;
+  category: 'state' | 'filesystem' | 'tools' | 'routing' | 'slack' | 'other';
+  title: string;
+  message: string;
+  assumptionKey?: string;
+} {
+  const errorCode = inferErrorCode(err);
+  const errorText = (err instanceof Error ? err.message : String(err)).trim();
+  if (errorText.toLowerCase().includes('state_stream_required')) {
+    return {
+      code: 'STATE_STREAM_REQUIRED',
+      category: 'state',
+      title: 'State stream required',
+      message:
+        'A run attempted state tools without a configured stream. Set talk.defaultStateStream or pass stream explicitly.',
+      assumptionKey: 'state:stream_required',
+    };
+  }
+  if (errorText.toLowerCase().includes('state_backend_workspace_files')) {
+    return {
+      code: 'STATE_BACKEND_WORKSPACE_FILES',
+      category: 'state',
+      title: 'State backend mismatch',
+      message:
+        'A run attempted stream-store state tools while this Talk is configured for workspace files.',
+      assumptionKey: 'state:workspace_backend_selected',
+    };
+  }
+  if (errorCode === 'unknown_channel') {
+    return {
+      code: 'SLACK_UNKNOWN_CHANNEL',
+      category: 'slack',
+      title: 'Slack channel delivery failed',
+      message: 'Slack rejected the target channel. Verify channel binding scope and bot channel membership.',
+      assumptionKey: `slack:unknown_channel:${errorText.toLowerCase()}`,
+    };
+  }
+  if (errorCode === 'auth_error') {
+    return {
+      code: 'SLACK_AUTH_ERROR',
+      category: 'slack',
+      title: 'Slack authentication failed',
+      message: 'Slack auth failed for this send attempt. Reconnect account credentials and retry.',
+      assumptionKey: 'slack:auth_error',
+    };
+  }
+  if (errorCode === 'timeout') {
+    return {
+      code: 'RUN_TIMEOUT',
+      category: 'routing',
+      title: 'Run timed out',
+      message: 'The run timed out before completion. Check model/tool latency or reduce prompt/tool workload.',
+      assumptionKey: 'runtime:timeout',
+    };
+  }
+  return {
+    code: 'INGRESS_PROCESSING_ERROR',
+    category: 'other',
+    title: 'Slack event processing failed',
+    message: errorText || 'Slack event failed after retries.',
+  };
+}
+
 function sanitizeUserFacingReply(raw: string): string {
   const text = raw.trim();
   if (!text) return raw;
@@ -817,6 +895,53 @@ function sanitizeUserFacingReply(raw: string): string {
     return 'No prior memory file exists yet for today. I will continue using current channel context.';
   }
   return raw;
+}
+
+function detectAssumptionMismatch(raw: string): {
+  code: string;
+  category: 'state' | 'filesystem' | 'tools' | 'other';
+  title: string;
+  message: string;
+  assumptionKey: string;
+} | null {
+  const text = raw.trim();
+  if (!text) return null;
+  const normalized = text.toLowerCase();
+  if (
+    normalized.includes('read failed: enoent') &&
+    (normalized.includes('/workspace/memory/') || normalized.includes('/memory/'))
+  ) {
+    return {
+      code: 'ASSUMED_MEMORY_FILE_MISSING',
+      category: 'filesystem',
+      title: 'Agent assumed missing memory file',
+      message:
+        'Agent attempted to read a memory markdown file that does not exist in this runtime. ' +
+        'Use stream_store state tools or ask the user which persistence backend to use.',
+      assumptionKey: 'filesystem:missing_memory_md',
+    };
+  }
+  if (normalized.includes('state_stream_required')) {
+    return {
+      code: 'STATE_STREAM_REQUIRED',
+      category: 'state',
+      title: 'State stream not configured',
+      message:
+        'State tools were invoked without an explicit stream and no usable state backend fallback was available.',
+      assumptionKey: 'state:stream_required',
+    };
+  }
+  if (normalized.includes('state_backend_workspace_files')) {
+    return {
+      code: 'STATE_BACKEND_WORKSPACE_FILES',
+      category: 'state',
+      title: 'State backend set to workspace files',
+      message:
+        'State stream tools are blocked because this Talk is configured for workspace file persistence.',
+      assumptionKey: 'state:workspace_backend_selected',
+    };
+  }
+  return null;
 }
 
 function shouldHandleViaBehavior(
@@ -1070,7 +1195,10 @@ async function callLlmForEvent(params: {
         agentId: resolvedHeaderAgentId ?? 'main',
       });
   headers['x-openclaw-trace-id'] = traceId;
-  headers['x-openclaw-session-key'] = sessionKey;
+  // In full_control mode, avoid OpenClaw embedded runtime routing so gateway tools remain callable.
+  if (talkExecutionMode !== 'full_control') {
+    headers['x-openclaw-session-key'] = sessionKey;
+  }
   if (talkExecutionMode === 'openclaw' && resolvedHeaderAgentId?.trim()) {
     headers['x-openclaw-agent-id'] = resolvedHeaderAgentId.trim();
   }
@@ -1334,6 +1462,47 @@ async function writeDeadLetter(params: {
   await fsp.appendFile(file, `${JSON.stringify(record)}\n`, 'utf-8');
 }
 
+async function recordTalkDiagnostic(params: {
+  deps: SlackIngressDeps;
+  item: QueueItem;
+  code: string;
+  category: 'state' | 'filesystem' | 'tools' | 'routing' | 'slack' | 'other';
+  title: string;
+  message: string;
+  assumptionKey?: string;
+  details?: Record<string, unknown>;
+}): Promise<void> {
+  const opened = params.deps.store.openDiagnostic(
+    params.item.talkId,
+    {
+      code: params.code,
+      category: params.category,
+      title: params.title,
+      message: params.message,
+      assumptionKey: params.assumptionKey,
+      details: params.details,
+    },
+    { modifiedBy: 'slack_ingress' },
+  );
+  if (!opened || !opened.created) return;
+  const content =
+    `[System Issue] ${params.title}\n` +
+    `${params.message}\n` +
+    `Issue code: ${params.code}\n` +
+    `Please reply in this Talk with how you want to proceed (for example: switch state backend, set a default stream, or keep workspace files).`;
+  await params.deps.store.appendMessage(
+    params.item.talkId,
+    {
+      id: randomUUID(),
+      role: 'system',
+      content,
+      timestamp: Date.now(),
+      agentName: 'ClawTalk Gateway',
+    },
+    { modifiedBy: 'slack_ingress' },
+  );
+}
+
 async function sendFailureNotice(params: {
   deps: SlackIngressDeps;
   item: QueueItem;
@@ -1386,6 +1555,23 @@ async function processQueueItem(item: QueueItem, deps: SlackIngressDeps): Promis
     item.agentName = generated.agentName;
     item.agentRole = generated.agentRole;
   }
+  const assumption = detectAssumptionMismatch(item.reply ?? '');
+  if (assumption) {
+    await recordTalkDiagnostic({
+      deps,
+      item,
+      code: assumption.code,
+      category: assumption.category,
+      title: assumption.title,
+      message: assumption.message,
+      assumptionKey: assumption.assumptionKey,
+      details: {
+        eventId: item.event.eventId,
+        channelId: item.event.channelId,
+        accountId: item.replyAccountId ?? item.event.accountId ?? '',
+      },
+    });
+  }
   item.reply = sanitizeUserFacingReply(item.reply ?? '');
 
   if (!isAttemptCurrent(item)) {
@@ -1437,6 +1623,22 @@ function scheduleRetry(item: QueueItem, deps: SlackIngressDeps, err: unknown): v
       errorMessage: (err instanceof Error ? err.message : String(err)).slice(0, 220),
     });
     const notifyOnFailure = process.env.CLAWTALK_INGRESS_NOTIFY_FAILURE !== '0' && !item.replySent;
+    const diagnostic = mapFailureToDiagnostic(err);
+    void recordTalkDiagnostic({
+      deps,
+      item,
+      code: diagnostic.code,
+      category: diagnostic.category,
+      title: diagnostic.title,
+      message: diagnostic.message,
+      assumptionKey: diagnostic.assumptionKey,
+      details: {
+        eventId: item.event.eventId,
+        channelId: item.event.channelId,
+        accountId: item.replyAccountId ?? item.event.accountId ?? '',
+        errorCode: inferErrorCode(err),
+      },
+    }).catch(() => {});
     if (notifyOnFailure) {
       void sendFailureNotice({ deps, item, failureError: err }).catch(() => {});
     }
@@ -1514,6 +1716,19 @@ function routeSlackIngressEvent(
   pruneSeenEvents();
   pruneOutboundSuppressions();
 
+  const liveTalks = deps.store.listTalks();
+  const liveSlackBindings: string[] = [];
+  for (const talk of liveTalks) {
+    for (const binding of talk.platformBindings ?? []) {
+      if (binding.platform.trim().toLowerCase() !== 'slack') continue;
+      liveSlackBindings.push(`${talk.id}:${binding.scope}:${binding.accountId ?? '-'}`);
+    }
+  }
+  deps.logger.debug(
+    `SlackIngress: runtime store=${deps.store.getInstanceId()} talks=${liveTalks.length} slackBindings=${liveSlackBindings.length} ` +
+    `[${liveSlackBindings.join(' | ')}] for event=${event.eventId}`,
+  );
+
   const seen = seenEvents.get(event.eventId);
   if (seen) {
     if (seen.decision === 'handled' && seen.talkId) {
@@ -1534,12 +1749,11 @@ function routeSlackIngressEvent(
   const ownership = inspectSlackOwnership(event, deps.store, deps.logger);
   if (ownership.decision === 'pass' || !ownership.talkId || !ownership.bindingId) {
     const reason = ownership.reason ?? 'no-binding';
-    if (reason !== 'no-binding') {
-      deps.logger.debug(
-        `SlackIngress: pass event=${event.eventId} account=${event.accountId ?? 'unknown'} ` +
-        `channel=${event.channelId} reason=${reason}`,
-      );
-    }
+    deps.logger.debug(
+      `SlackIngress: pass event=${event.eventId} account=${event.accountId ?? 'unknown'} ` +
+      `channel=${event.channelId} reason=${reason} ` +
+      `talk=${ownership.talkId ?? '-'} binding=${ownership.bindingId ?? '-'}`,
+    );
     if (ownership.talkId) {
       getTalkCounters(ownership.talkId).passed += 1;
     }
@@ -1692,7 +1906,12 @@ function parseSlackMessageReceivedHookEvent(
   }
 
   const metadata = asRecord(event.metadata);
-  const outboundTarget = normalizeText(metadata?.to) ?? normalizeText(ctx.conversationId);
+  // OpenClaw inbound hook metadata uses `originatingTo` for the original channel target.
+  // `to` can be a human label (e.g., "general"), which is not stable for ownership routing.
+  const outboundTarget =
+    normalizeText(metadata?.originatingTo) ??
+    normalizeText(ctx.conversationId) ??
+    normalizeText(metadata?.to);
   const channelId = parseSlackTargetId(outboundTarget) ?? parseSlackFromId(event.from);
   if (!channelId) {
     return null;
@@ -1768,7 +1987,23 @@ export async function handleSlackMessageReceivedHook(
   deps: SlackIngressDeps,
 ): Promise<MessageReceivedHookResult> {
   const parsed = parseSlackMessageReceivedHookEvent(event, ctx);
-  if (!parsed) return undefined;
+  if (!parsed) {
+    if (ctx.channelId.trim().toLowerCase() === 'slack') {
+      const metadata = asRecord(event.metadata);
+      deps.logger.debug(
+        `SlackIngress: parse-skip channel=${ctx.channelId} ` +
+        `conversation=${ctx.conversationId ?? '-'} from=${event.from ?? '-'} ` +
+        `meta.to=${normalizeText(metadata?.to) ?? '-'} ` +
+        `meta.originatingTo=${normalizeText(metadata?.originatingTo) ?? '-'} ` +
+        `textLen=${(event.content ?? '').length}`,
+      );
+    }
+    return undefined;
+  }
+  deps.logger.debug(
+    `SlackIngress: parsed event=${parsed.eventId} account=${parsed.accountId ?? '-'} ` +
+    `channel=${parsed.channelId} target=${parsed.outboundTarget ?? '-'} textLen=${parsed.text.length}`,
+  );
   const decision = routeSlackIngressEvent(parsed, deps);
   return decision.payload.decision === 'handled' ? { cancel: true } : undefined;
 }

@@ -619,6 +619,10 @@ const plugin = {
       syncClients.delete(res);
     };
     const unsubscribeTalkStoreChange = talkStore.onChange((evt) => {
+      api.logger.info(
+        `TalkStore change: type=${evt.type} talk=${evt.talkId} talkCount=${talkStore.listTalks().length} ` +
+        `store=${talkStore.getInstanceId()} by=${evt.lastModifiedBy ?? 'unknown'} version=${evt.talkVersion}`,
+      );
       appendSyncEvent('talk_changed', {
         talkId: evt.talkId,
         mutationType: evt.type,

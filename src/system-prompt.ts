@@ -43,6 +43,8 @@ function totalPromptBytes(sections: string[]): number {
 
 export function composeSystemPrompt(input: SystemPromptInput): string | undefined {
   const { meta, contextMd, pinnedMessages, activeModel, agentOverride, registry, toolManifest, toolMode } = input;
+  const stateBackend = meta.stateBackend ?? 'stream_store';
+  const defaultStateStream = meta.defaultStateStream ?? 'default';
 
   // Priority-ordered sections: identity > objective > context > pinned > jobs > tools
   // Each section is built and then assembled, truncating lower-priority sections if needed.
@@ -90,6 +92,10 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
         '- If Google tools are unavailable or blocked, say that explicitly and mention Execution Mode / OAuth readiness as the likely cause.\n' +
         '- For `read`, always provide a concrete `file_path` argument. Never call `read` with empty or missing path.\n' +
         '- For `edit`/`apply_patch`, include all required fields and validate target paths before calling.\n' +
+        `- Talk state backend: \`${stateBackend}\`. ` +
+        (stateBackend === 'stream_store'
+          ? `Prefer state tools (\`state_append_event\`, \`state_read_summary\`) and default stream \`${defaultStateStream}\`. Do not assume memory markdown files exist.\n`
+          : 'Use workspace files for persistence and do not call state_* stream tools unless the user switches backend.\n') +
         '- `shell_exec` runs commands in a bash shell on the server. Use it for file creation, curl, package installs, etc.\n' +
         '- `manage_tools` lets you register new custom tools to expand your capabilities.\n' +
         '- Always report tool results clearly. Show relevant output, not just "done".\n' +
@@ -123,6 +129,10 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
           : ''
       ) +
       '**If you have tools available:** Use them. If a tool call fails, tell the user what happened and suggest alternatives.\n\n' +
+      `Talk state backend: \`${stateBackend}\`. ` +
+      (stateBackend === 'stream_store'
+        ? `Prefer state tools with stream \`${defaultStateStream}\`; do not assume memory markdown files exist.\n\n`
+        : 'Persist tracking data in workspace files unless the user switches backend.\n\n') +
       '**If you do NOT have tools available:** You can only output text in this response. Be upfront about this:\n' +
       '- If asked to create a document or report, write the full content directly in your response.\n' +
       '- If asked to do something that requires tools you don\'t have (file upload, web search, API calls, code execution), ' +

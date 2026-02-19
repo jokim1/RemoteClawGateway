@@ -29,6 +29,9 @@ import type {
   TalkStateEvent,
   TalkStatePolicy,
   TalkStateSnapshot,
+  TalkDiagnosticCategory,
+  TalkDiagnosticIssue,
+  TalkDiagnosticStatus,
   Logger,
 } from './types.js';
 
@@ -49,7 +52,9 @@ type TalkMutationType =
   | 'directives_set'
   | 'bindings_set'
   | 'behaviors_set'
-  | 'state_updated';
+  | 'state_updated'
+  | 'diagnostic_opened'
+  | 'diagnostic_updated';
 
 export type TalkStoreChangeEvent = {
   type: TalkMutationType;
@@ -163,6 +168,12 @@ function normalizeNetworkAccess(raw: unknown): 'restricted' | 'full_outbound' {
   if (value === 'restricted') return 'restricted';
   if (value === 'full_outbound' || value === 'full') return 'full_outbound';
   return 'full_outbound';
+}
+
+function normalizeStateBackend(raw: unknown): 'stream_store' | 'workspace_files' {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (value === 'workspace_files' || value === 'workspace') return 'workspace_files';
+  return 'stream_store';
 }
 
 function normalizeToolNames(input: unknown): string[] {
@@ -493,10 +504,83 @@ function normalizePlatformBehaviors(
     .filter((entry): entry is PlatformBehavior => Boolean(entry));
 }
 
+function normalizeDiagnosticStatus(raw: unknown): TalkDiagnosticStatus {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (value === 'resolved') return 'resolved';
+  if (value === 'dismissed') return 'dismissed';
+  return 'open';
+}
+
+function normalizeDiagnosticCategory(raw: unknown): TalkDiagnosticCategory {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (
+    value === 'state' ||
+    value === 'filesystem' ||
+    value === 'tools' ||
+    value === 'routing' ||
+    value === 'slack'
+  ) return value;
+  return 'other';
+}
+
+function normalizeDiagnostics(input: unknown): TalkDiagnosticIssue[] {
+  if (!Array.isArray(input)) return [];
+  const now = Date.now();
+  const seen = new Set<string>();
+  const normalized: TalkDiagnosticIssue[] = [];
+  for (const entry of input) {
+    if (!entry || typeof entry !== 'object') continue;
+    const row = entry as Record<string, unknown>;
+    const id = typeof row.id === 'string' && row.id.trim() ? row.id.trim() : randomUUID();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const code = typeof row.code === 'string' ? row.code.trim() : '';
+    const title = typeof row.title === 'string' ? row.title.trim() : '';
+    const message = typeof row.message === 'string' ? row.message.trim() : '';
+    if (!code || !title || !message) continue;
+    const status = normalizeDiagnosticStatus(row.status);
+    const firstSeenAt = typeof row.firstSeenAt === 'number' && Number.isFinite(row.firstSeenAt)
+      ? row.firstSeenAt
+      : now;
+    const lastSeenAt = typeof row.lastSeenAt === 'number' && Number.isFinite(row.lastSeenAt)
+      ? row.lastSeenAt
+      : firstSeenAt;
+    const occurrences = typeof row.occurrences === 'number' && Number.isFinite(row.occurrences)
+      ? Math.max(1, Math.floor(row.occurrences))
+      : 1;
+    const issue: TalkDiagnosticIssue = {
+      id,
+      code,
+      category: normalizeDiagnosticCategory(row.category),
+      title,
+      message,
+      status,
+      firstSeenAt,
+      lastSeenAt,
+      occurrences,
+      ...(typeof row.assumptionKey === 'string' && row.assumptionKey.trim()
+        ? { assumptionKey: row.assumptionKey.trim() }
+        : {}),
+      ...(row.details && typeof row.details === 'object' && !Array.isArray(row.details)
+        ? { details: row.details as Record<string, unknown> }
+        : {}),
+      ...(typeof row.resolvedAt === 'number' && Number.isFinite(row.resolvedAt)
+        ? { resolvedAt: row.resolvedAt }
+        : {}),
+      ...(typeof row.dismissedAt === 'number' && Number.isFinite(row.dismissedAt)
+        ? { dismissedAt: row.dismissedAt }
+        : {}),
+    };
+    normalized.push(issue);
+  }
+  return normalized.sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+}
+
 export class TalkStore {
   private readonly talksDir: string;
   private readonly talks: Map<string, TalkMeta> = new Map();
   private readonly logger: Logger;
+  private readonly instanceId: string = randomUUID().slice(0, 8);
   private readonly changeListeners = new Set<(event: TalkStoreChangeEvent) => void>();
   private readonly stateLocks = new Map<string, Promise<unknown>>();
 
@@ -565,6 +649,8 @@ export class TalkStore {
 
   private async loadAllAsync(): Promise<void> {
     try {
+      this.talks.clear();
+      this.invalidateListCache();
       const dirs = await fsp.readdir(this.talksDir);
       for (const dir of dirs) {
         if (!isValidId(dir)) continue;
@@ -583,10 +669,12 @@ export class TalkStore {
           meta.executionMode = normalizeExecutionMode(meta.executionMode);
           meta.filesystemAccess = normalizeFilesystemAccess(meta.filesystemAccess);
           meta.networkAccess = normalizeNetworkAccess(meta.networkAccess);
+          meta.stateBackend = normalizeStateBackend(meta.stateBackend);
           meta.toolsAllow = normalizeToolNames(meta.toolsAllow);
           meta.toolsDeny = normalizeToolNames(meta.toolsDeny);
           meta.googleAuthProfile = normalizeGoogleAuthProfile(meta.googleAuthProfile);
           meta.defaultStateStream = normalizeOptionalStateStream(meta.defaultStateStream);
+          meta.diagnostics = normalizeDiagnostics(meta.diagnostics);
           meta.talkVersion =
             typeof meta.talkVersion === 'number' && Number.isFinite(meta.talkVersion)
               ? Math.max(1, Math.floor(meta.talkVersion))
@@ -606,6 +694,7 @@ export class TalkStore {
             meta.processing = false;
           }
           this.talks.set(meta.id, meta);
+          this.invalidateListCache();
         } catch (err) {
           // File may not exist or be corrupted — skip it
           if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -613,7 +702,17 @@ export class TalkStore {
           }
         }
       }
-      this.logger.info(`TalkStore: loaded ${this.talks.size} talks`);
+      const slackBindings: string[] = [];
+      for (const talk of this.talks.values()) {
+        for (const binding of talk.platformBindings ?? []) {
+          if (binding.platform.trim().toLowerCase() !== 'slack') continue;
+          slackBindings.push(`${talk.id}:${binding.scope}:${binding.accountId ?? '-'}`);
+        }
+      }
+      this.logger.info(
+        `TalkStore[${this.instanceId}]: loaded ${this.talks.size} talks from ${this.talksDir} ` +
+        `(slackBindings=${slackBindings.length}${slackBindings.length ? ` [${slackBindings.join(' | ')}]` : ''})`,
+      );
     } catch (err) {
       this.logger.warn(`TalkStore: failed to read talks dir: ${err}`);
     }
@@ -622,6 +721,10 @@ export class TalkStore {
   /** Invalidate listTalks sorted cache. */
   private invalidateListCache(): void {
     this.listTalksCache = null;
+  }
+
+  getInstanceId(): string {
+    return this.instanceId;
   }
 
   // -------------------------------------------------------------------------
@@ -647,9 +750,11 @@ export class TalkStore {
       executionMode: 'openclaw',
       filesystemAccess: 'full_host_access',
       networkAccess: 'full_outbound',
+      stateBackend: 'stream_store',
       toolMode: 'auto',
       toolsAllow: [],
       toolsDeny: [],
+      diagnostics: [],
       createdAt: now,
       updatedAt: now,
     };
@@ -668,11 +773,11 @@ export class TalkStore {
   }
 
   listTalks(): TalkMeta[] {
-    if (this.listTalksCache) return this.listTalksCache;
+    if (this.listTalksCache) return [...this.listTalksCache];
     const sorted = Array.from(this.talks.values())
       .sort((a, b) => b.updatedAt - a.updatedAt);
     this.listTalksCache = sorted;
-    return sorted;
+    return [...sorted];
   }
 
   updateTalk(
@@ -680,7 +785,7 @@ export class TalkStore {
     updates: Partial<
       Pick<
         TalkMeta,
-        'topicTitle' | 'objective' | 'model' | 'agents' | 'directives' | 'platformBindings' | 'platformBehaviors' | 'toolMode' | 'executionMode' | 'filesystemAccess' | 'networkAccess' | 'toolsAllow' | 'toolsDeny' | 'googleAuthProfile' | 'defaultStateStream'
+        'topicTitle' | 'objective' | 'model' | 'agents' | 'directives' | 'platformBindings' | 'platformBehaviors' | 'toolMode' | 'executionMode' | 'filesystemAccess' | 'networkAccess' | 'stateBackend' | 'toolsAllow' | 'toolsDeny' | 'googleAuthProfile' | 'defaultStateStream'
       >
     >,
     options?: { modifiedBy?: string },
@@ -715,6 +820,9 @@ export class TalkStore {
     if (updates.networkAccess !== undefined) {
       meta.networkAccess = normalizeNetworkAccess(updates.networkAccess);
     }
+    if (updates.stateBackend !== undefined) {
+      meta.stateBackend = normalizeStateBackend(updates.stateBackend);
+    }
     if (updates.toolsAllow !== undefined) {
       meta.toolsAllow = normalizeToolNames(updates.toolsAllow);
     }
@@ -734,7 +842,7 @@ export class TalkStore {
   resolveStateStream(
     talkId: string,
     explicitStream?: string,
-  ): { ok: true; stream: string } | { ok: false; code: 'STATE_STREAM_REQUIRED'; message: string } {
+  ): { ok: true; stream: string } | { ok: false; code: 'STATE_STREAM_REQUIRED' | 'STATE_BACKEND_WORKSPACE_FILES'; message: string } {
     const talk = this.talks.get(talkId);
     if (!talk) {
       return {
@@ -743,15 +851,106 @@ export class TalkStore {
         message: 'Talk not found',
       };
     }
+    const backend = normalizeStateBackend(talk.stateBackend);
+    if (backend === 'workspace_files') {
+      return {
+        ok: false,
+        code: 'STATE_BACKEND_WORKSPACE_FILES',
+        message: 'Talk stateBackend is workspace_files. Use file tools or switch talk.stateBackend to stream_store.',
+      };
+    }
     const explicit = normalizeOptionalStateStream(explicitStream);
     if (explicit) return { ok: true, stream: explicit };
     const talkDefault = normalizeOptionalStateStream(talk.defaultStateStream);
     if (talkDefault) return { ok: true, stream: talkDefault };
-    return {
-      ok: false,
-      code: 'STATE_STREAM_REQUIRED',
-      message: 'State stream is required. Pass `stream` or configure talk.defaultStateStream.',
+    return { ok: true, stream: DEFAULT_STATE_STREAM };
+  }
+
+  listDiagnostics(talkId: string): TalkDiagnosticIssue[] {
+    const talk = this.talks.get(talkId);
+    if (!talk) return [];
+    return [...(talk.diagnostics ?? [])].sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+  }
+
+  openDiagnostic(
+    talkId: string,
+    input: {
+      code: string;
+      category: TalkDiagnosticCategory;
+      title: string;
+      message: string;
+      assumptionKey?: string;
+      details?: Record<string, unknown>;
+    },
+    options?: { modifiedBy?: string },
+  ): { issue: TalkDiagnosticIssue; created: boolean } | null {
+    const talk = this.talks.get(talkId);
+    if (!talk) return null;
+    const now = Date.now();
+    const diagnostics = talk.diagnostics ?? [];
+    const normalizedCode = input.code.trim();
+    const normalizedAssumptionKey = input.assumptionKey?.trim();
+    const existing = diagnostics.find((issue) =>
+      issue.status === 'open' &&
+      (
+        (normalizedAssumptionKey && issue.assumptionKey === normalizedAssumptionKey) ||
+        (!normalizedAssumptionKey && issue.code === normalizedCode)
+      ));
+    if (existing) {
+      existing.lastSeenAt = now;
+      existing.occurrences += 1;
+      if (input.details && Object.keys(input.details).length > 0) {
+        existing.details = { ...(existing.details ?? {}), ...input.details };
+      }
+      this.touchMeta(talk, 'diagnostic_updated', { modifiedBy: options?.modifiedBy });
+      return { issue: existing, created: false };
+    }
+
+    const issue: TalkDiagnosticIssue = {
+      id: randomUUID(),
+      code: normalizedCode || 'unknown_issue',
+      category: normalizeDiagnosticCategory(input.category),
+      title: input.title.trim() || 'Issue detected',
+      message: input.message.trim() || 'An issue was detected.',
+      status: 'open',
+      firstSeenAt: now,
+      lastSeenAt: now,
+      occurrences: 1,
+      ...(normalizedAssumptionKey ? { assumptionKey: normalizedAssumptionKey } : {}),
+      ...(input.details && Object.keys(input.details).length > 0 ? { details: input.details } : {}),
     };
+    diagnostics.unshift(issue);
+    talk.diagnostics = diagnostics;
+    this.touchMeta(talk, 'diagnostic_opened', { modifiedBy: options?.modifiedBy });
+    return { issue, created: true };
+  }
+
+  updateDiagnosticStatus(
+    talkId: string,
+    issueId: string,
+    status: TalkDiagnosticStatus,
+    options?: { modifiedBy?: string },
+  ): TalkDiagnosticIssue | null {
+    const talk = this.talks.get(talkId);
+    if (!talk) return null;
+    const diagnostics = talk.diagnostics ?? [];
+    const issue = diagnostics.find((entry) => entry.id === issueId);
+    if (!issue) return null;
+    const now = Date.now();
+    issue.status = normalizeDiagnosticStatus(status);
+    issue.lastSeenAt = now;
+    if (issue.status === 'resolved') {
+      issue.resolvedAt = now;
+      delete issue.dismissedAt;
+    } else if (issue.status === 'dismissed') {
+      issue.dismissedAt = now;
+      delete issue.resolvedAt;
+    } else {
+      delete issue.resolvedAt;
+      delete issue.dismissedAt;
+    }
+    this.touchMeta(talk, 'diagnostic_updated', { modifiedBy: options?.modifiedBy });
+    return issue;
   }
 
   deleteTalk(id: string, options?: { modifiedBy?: string }): boolean {

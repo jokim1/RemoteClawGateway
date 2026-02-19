@@ -405,6 +405,15 @@ function normalizeStateStreamInput(raw: unknown): string | undefined {
   return normalized || '';
 }
 
+function normalizeStateBackendInput(raw: unknown): 'stream_store' | 'workspace_files' | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string') return undefined;
+  const value = raw.trim().toLowerCase();
+  if (value === 'stream_store') return 'stream_store';
+  if (value === 'workspace_files' || value === 'workspace') return 'workspace_files';
+  return undefined;
+}
+
 function executionModeValidationError(): string {
   return 'executionMode must be one of: openclaw, full_control, openclaw_agent, clawtalk_proxy';
 }
@@ -415,6 +424,10 @@ function filesystemAccessValidationError(): string {
 
 function networkAccessValidationError(): string {
   return 'networkAccess must be one of: restricted, full_outbound';
+}
+
+function stateBackendValidationError(): string {
+  return 'stateBackend must be one of: stream_store, workspace_files';
 }
 
 function mapChannelResponseSettingsInput(input: unknown): unknown {
@@ -1201,6 +1214,22 @@ export async function handleTalks(ctx: HandlerContext, store: TalkStore, registr
     return handleGetMessages(ctx, store, messagesMatch[1]);
   }
 
+  // GET /api/talks/:id/diagnostics
+  const diagnosticsMatch = pathname.match(/^\/api\/talks\/([\w-]+)\/diagnostics$/);
+  if (diagnosticsMatch) {
+    if (req.method === 'GET') return handleListDiagnostics(ctx, store, diagnosticsMatch[1]);
+    sendJson(res, 405, { error: 'Method not allowed' });
+    return;
+  }
+
+  // PATCH /api/talks/:id/diagnostics/:issueId
+  const diagnosticMatch = pathname.match(/^\/api\/talks\/([\w-]+)\/diagnostics\/([\w-]+)$/);
+  if (diagnosticMatch) {
+    if (req.method === 'PATCH') return handleUpdateDiagnostic(ctx, store, diagnosticMatch[1], diagnosticMatch[2]);
+    sendJson(res, 405, { error: 'Method not allowed' });
+    return;
+  }
+
   // GET/PATCH /api/talks/:id/tools
   const toolsMatch = pathname.match(/^\/api\/talks\/([\w-]+)\/tools$/);
   if (toolsMatch) {
@@ -1329,6 +1358,7 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
     executionMode?: string;
     filesystemAccess?: string;
     networkAccess?: string;
+    stateBackend?: string;
     toolsAllow?: string[];
     toolsDeny?: string[];
     googleAuthProfile?: string;
@@ -1338,6 +1368,7 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
       executionMode?: string;
       filesystemAccess?: string;
       networkAccess?: string;
+      stateBackend?: string;
       allow?: string[];
       deny?: string[];
       googleAuthProfile?: string;
@@ -1377,6 +1408,9 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
   if (body.networkAccess === undefined && body.toolPolicy?.networkAccess !== undefined) {
     body.networkAccess = body.toolPolicy.networkAccess;
   }
+  if (body.stateBackend === undefined && body.toolPolicy?.stateBackend !== undefined) {
+    body.stateBackend = body.toolPolicy.stateBackend;
+  }
   if (body.toolsDeny === undefined && body.toolPolicy?.deny !== undefined) {
     body.toolsDeny = body.toolPolicy.deny;
   }
@@ -1405,6 +1439,11 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
   const networkAccess = normalizeNetworkAccessInput(body.networkAccess);
   if (body.networkAccess !== undefined && networkAccess === undefined) {
     sendJson(ctx.res, 400, { error: networkAccessValidationError() });
+    return;
+  }
+  const stateBackend = normalizeStateBackendInput(body.stateBackend);
+  if (body.stateBackend !== undefined && stateBackend === undefined) {
+    sendJson(ctx.res, 400, { error: stateBackendValidationError() });
     return;
   }
   const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
@@ -1472,6 +1511,7 @@ async function handleCreateTalk(ctx: HandlerContext, store: TalkStore): Promise<
     ...(executionMode !== undefined ? { executionMode } : {}),
     ...(filesystemAccess !== undefined ? { filesystemAccess } : {}),
     ...(networkAccess !== undefined ? { networkAccess } : {}),
+    ...(stateBackend !== undefined ? { stateBackend } : {}),
     ...(toolsAllow !== undefined ? { toolsAllow } : {}),
     ...(toolsDeny !== undefined ? { toolsDeny } : {}),
     ...(googleAuthProfile !== undefined ? { googleAuthProfile: googleAuthProfile || undefined } : {}),
@@ -1526,7 +1566,10 @@ async function handleGetTalk(ctx: HandlerContext, store: TalkStore, talkId: stri
     filesystemAccessOptions: ['workspace_sandbox', 'full_host_access'],
     networkAccess: resolveNetworkAccess(talk),
     networkAccessOptions: ['restricted', 'full_outbound'],
+    stateBackend: talk.stateBackend ?? 'stream_store',
+    stateBackendOptions: ['stream_store', 'workspace_files'],
     contextMd,
+    diagnostics: store.listDiagnostics(talkId),
     capabilities,
   });
 }
@@ -1601,6 +1644,8 @@ async function handleGetTalkTools(
     filesystemAccessOptions: ['workspace_sandbox', 'full_host_access'],
     networkAccess: resolveNetworkAccess(talk),
     networkAccessOptions: ['restricted', 'full_outbound'],
+    stateBackend: talk.stateBackend ?? 'stream_store',
+    stateBackendOptions: ['stream_store', 'workspace_files'],
     toolsAllow: talk.toolsAllow ?? [],
     toolsDeny: talk.toolsDeny ?? [],
     googleAuthProfile: talk.googleAuthProfile,
@@ -1623,6 +1668,7 @@ async function handleUpdateTalkTools(
     executionMode?: string;
     filesystemAccess?: string;
     networkAccess?: string;
+    stateBackend?: string;
     toolsAllow?: string[];
     toolsDeny?: string[];
     googleAuthProfile?: string;
@@ -1664,6 +1710,11 @@ async function handleUpdateTalkTools(
     sendJson(ctx.res, 400, { error: networkAccessValidationError() });
     return;
   }
+  const stateBackend = normalizeStateBackendInput(body.stateBackend);
+  if (body.stateBackend !== undefined && stateBackend === undefined) {
+    sendJson(ctx.res, 400, { error: stateBackendValidationError() });
+    return;
+  }
   const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
   const toolsDeny = normalizeToolNameListInput(body.toolsDeny);
   const googleAuthProfile = normalizeGoogleAuthProfileInput(body.googleAuthProfile);
@@ -1682,6 +1733,7 @@ async function handleUpdateTalkTools(
     ...(executionMode !== undefined ? { executionMode } : {}),
     ...(filesystemAccess !== undefined ? { filesystemAccess } : {}),
     ...(networkAccess !== undefined ? { networkAccess } : {}),
+    ...(stateBackend !== undefined ? { stateBackend } : {}),
     ...(toolsAllow !== undefined ? { toolsAllow } : {}),
     ...(toolsDeny !== undefined ? { toolsDeny } : {}),
     ...(googleAuthProfile !== undefined ? { googleAuthProfile: googleAuthProfile || undefined } : {}),
@@ -1734,6 +1786,8 @@ async function handleUpdateTalkTools(
     filesystemAccessOptions: ['workspace_sandbox', 'full_host_access'],
     networkAccess: resolveNetworkAccess(updated),
     networkAccessOptions: ['restricted', 'full_outbound'],
+    stateBackend: updated.stateBackend ?? 'stream_store',
+    stateBackendOptions: ['stream_store', 'workspace_files'],
     toolsAllow: updated.toolsAllow ?? [],
     toolsDeny: updated.toolsDeny ?? [],
     googleAuthProfile: updated.googleAuthProfile,
@@ -1763,6 +1817,7 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
     executionMode?: string;
     filesystemAccess?: string;
     networkAccess?: string;
+    stateBackend?: string;
     toolsAllow?: string[];
     toolsDeny?: string[];
     googleAuthProfile?: string;
@@ -1772,6 +1827,7 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
       executionMode?: string;
       filesystemAccess?: string;
       networkAccess?: string;
+      stateBackend?: string;
       allow?: string[];
       deny?: string[];
       googleAuthProfile?: string;
@@ -1821,6 +1877,9 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
   if (body.networkAccess === undefined && body.toolPolicy?.networkAccess !== undefined) {
     body.networkAccess = body.toolPolicy.networkAccess;
   }
+  if (body.stateBackend === undefined && body.toolPolicy?.stateBackend !== undefined) {
+    body.stateBackend = body.toolPolicy.stateBackend;
+  }
   if (body.toolsDeny === undefined && body.toolPolicy?.deny !== undefined) {
     body.toolsDeny = body.toolPolicy.deny;
   }
@@ -1849,6 +1908,11 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
   const networkAccess = normalizeNetworkAccessInput(body.networkAccess);
   if (body.networkAccess !== undefined && networkAccess === undefined) {
     sendJson(ctx.res, 400, { error: networkAccessValidationError() });
+    return;
+  }
+  const stateBackend = normalizeStateBackendInput(body.stateBackend);
+  if (body.stateBackend !== undefined && stateBackend === undefined) {
+    sendJson(ctx.res, 400, { error: stateBackendValidationError() });
     return;
   }
   const toolsAllow = normalizeToolNameListInput(body.toolsAllow);
@@ -1939,6 +2003,7 @@ async function handleUpdateTalk(ctx: HandlerContext, store: TalkStore, talkId: s
     executionMode,
     filesystemAccess,
     networkAccess,
+    stateBackend,
     toolsAllow,
     toolsDeny,
     ...(googleAuthProfile !== undefined ? { googleAuthProfile: googleAuthProfile || undefined } : {}),
@@ -1958,9 +2023,21 @@ async function handleDeleteTalk(ctx: HandlerContext, store: TalkStore, talkId: s
     sendJson(ctx.res, 404, { error: 'Talk not found' });
     return;
   }
+  const confirmHeader = ctx.req.headers['x-clawtalk-confirm-delete'];
+  const confirmValue = Array.isArray(confirmHeader) ? confirmHeader[0] : confirmHeader;
+  const confirmed = typeof confirmValue === 'string' && confirmValue.trim().toLowerCase() === 'true';
+  if (!confirmed) {
+    sendJson(ctx.res, 409, {
+      error: 'Delete requires explicit confirmation header: x-clawtalk-confirm-delete: true',
+    });
+    return;
+  }
   const precondition = requireTalkPreconditionVersion(ctx, talk);
   if (!precondition.ok) return;
   const modifiedBy = extractClientIdHeader(ctx);
+  ctx.logger.warn(
+    `Talk delete requested: talk=${talkId} by=${modifiedBy || 'unknown'} ua=${ctx.req.headers['user-agent'] || '-'}`,
+  );
   const success = store.deleteTalk(talkId, { modifiedBy });
   if (!success) {
     sendJson(ctx.res, 404, { error: 'Talk not found' });
@@ -2018,6 +2095,66 @@ async function handleDeleteMessages(ctx: HandlerContext, store: TalkStore, talkI
 
   const result = await store.deleteMessages(talkId, body.messageIds);
   sendJson(ctx.res, 200, result);
+}
+
+async function handleListDiagnostics(ctx: HandlerContext, store: TalkStore, talkId: string): Promise<void> {
+  const talk = store.getTalk(talkId);
+  if (!talk) {
+    sendJson(ctx.res, 404, { error: 'Talk not found' });
+    return;
+  }
+  sendJson(ctx.res, 200, {
+    talkId,
+    diagnostics: store.listDiagnostics(talkId),
+  });
+}
+
+async function handleUpdateDiagnostic(
+  ctx: HandlerContext,
+  store: TalkStore,
+  talkId: string,
+  issueId: string,
+): Promise<void> {
+  const talk = store.getTalk(talkId);
+  if (!talk) {
+    sendJson(ctx.res, 404, { error: 'Talk not found' });
+    return;
+  }
+  const precondition = requireTalkPreconditionVersion(ctx, talk);
+  if (!precondition.ok) return;
+  const modifiedBy = extractClientIdHeader(ctx);
+
+  let body: { status?: string };
+  try {
+    body = (await readJsonBody(ctx.req)) as typeof body;
+  } catch {
+    sendJson(ctx.res, 400, { error: 'Invalid JSON body' });
+    return;
+  }
+  const rawStatus = typeof body.status === 'string' ? body.status.trim().toLowerCase() : '';
+  if (rawStatus !== 'open' && rawStatus !== 'resolved' && rawStatus !== 'dismissed') {
+    sendJson(ctx.res, 400, { error: 'status must be one of: open, resolved, dismissed' });
+    return;
+  }
+  const updated = store.updateDiagnosticStatus(
+    talkId,
+    issueId,
+    rawStatus as 'open' | 'resolved' | 'dismissed',
+    { modifiedBy },
+  );
+  if (!updated) {
+    sendJson(ctx.res, 404, { error: 'Diagnostic not found' });
+    return;
+  }
+  const current = store.getTalk(talkId);
+  if (current) {
+    ctx.res.setHeader('ETag', `"${current.talkVersion}"`);
+  }
+  sendJson(ctx.res, 200, {
+    talkId,
+    diagnostic: updated,
+    diagnostics: store.listDiagnostics(talkId),
+  });
 }
 
 async function handleAddPin(ctx: HandlerContext, store: TalkStore, talkId: string, msgId: string): Promise<void> {
