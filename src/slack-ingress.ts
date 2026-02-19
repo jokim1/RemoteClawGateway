@@ -63,6 +63,8 @@ type QueueItem = {
   replyAccountId?: string;
   behaviorAgentName?: string;
   behaviorOnMessagePrompt?: string;
+  behaviorDeliveryMode?: 'thread' | 'channel' | 'adaptive';
+  behaviorIntent?: 'study' | 'advice' | 'other';
   attempt: number;
   enqueuedAt: number;
   inboundContent?: string;
@@ -171,6 +173,8 @@ export type SlackOwnershipInspection = {
   bindingId?: string;
   behaviorAgentName?: string;
   behaviorOnMessagePrompt?: string;
+  behaviorDeliveryMode?: 'thread' | 'channel' | 'adaptive';
+  behaviorIntent?: 'study' | 'advice' | 'other';
 };
 
 export type MessageReceivedHookEvent = {
@@ -653,16 +657,38 @@ function resolveBehaviorForBinding(meta: TalkMeta, bindingId: string): {
   responseMode?: 'off' | 'mentions' | 'all';
   agentName?: string;
   onMessagePrompt?: string;
+  deliveryMode?: 'thread' | 'channel' | 'adaptive';
+  responsePolicy?: {
+    triggerPolicy?: 'judgment' | 'study_entries_only' | 'advice_or_study';
+    allowedSenders?: string[];
+    minConfidence?: number;
+  };
 } | undefined {
   const behavior = (meta.platformBehaviors ?? []).find((entry) => entry.platformBindingId === bindingId);
   if (!behavior) return undefined;
   const responseMode =
     behavior.responseMode ??
     ((behavior as { autoRespond?: boolean }).autoRespond === false ? 'off' : undefined);
+  const deliveryMode = behavior.deliveryMode;
+  const triggerPolicy = behavior.responsePolicy?.triggerPolicy;
+  const allowedSenders = behavior.responsePolicy?.allowedSenders;
+  const minConfidence = behavior.responsePolicy?.minConfidence;
   return {
     ...(responseMode ? { responseMode } : {}),
     agentName: behavior.agentName?.trim() || undefined,
     onMessagePrompt: behavior.onMessagePrompt?.trim() || undefined,
+    ...(deliveryMode ? { deliveryMode } : {}),
+    ...(
+      triggerPolicy || (Array.isArray(allowedSenders) && allowedSenders.length > 0) || minConfidence !== undefined
+        ? {
+            responsePolicy: {
+              ...(triggerPolicy ? { triggerPolicy } : {}),
+              ...(Array.isArray(allowedSenders) && allowedSenders.length > 0 ? { allowedSenders } : {}),
+              ...(minConfidence !== undefined ? { minConfidence } : {}),
+            },
+          }
+        : {}
+    ),
   };
 }
 
@@ -674,26 +700,93 @@ function messageLooksLikeMention(text: string): boolean {
   return false;
 }
 
-function shouldHandleViaBehavior(meta: TalkMeta, bindingId: string, eventText: string): {
+function looksLikeStudyEntry(text: string): boolean {
+  const t = text.toLowerCase();
+  if (!t.trim()) return false;
+  const hasTime = /\b\d+\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes)\b/i.test(t);
+  const hasStudyKeyword = /\b(study|studied|homework|mathcounts|khan|practice|worked|work|productive|coding|art|project)\b/i.test(t);
+  return hasTime && hasStudyKeyword;
+}
+
+function looksLikeAdviceRequest(text: string): boolean {
+  const t = text.toLowerCase();
+  if (!t.trim()) return false;
+  return /\b(help|advice|how do i|what should i|can you|should i|guidance)\b/i.test(t);
+}
+
+function senderAllowed(
+  behavior: { responsePolicy?: { allowedSenders?: string[] } } | undefined,
+  event: { userId?: string; userName?: string },
+): boolean {
+  const allowed = behavior?.responsePolicy?.allowedSenders;
+  if (!Array.isArray(allowed) || allowed.length === 0) return true;
+  const keys = new Set(
+    allowed
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  if (keys.size === 0) return true;
+  const candidates = [
+    event.userName?.trim().toLowerCase(),
+    event.userId?.trim().toLowerCase(),
+  ].filter((v): v is string => Boolean(v));
+  return candidates.some((candidate) => keys.has(candidate));
+}
+
+function resolveMessageIntent(eventText: string): 'study' | 'advice' | 'other' {
+  if (looksLikeStudyEntry(eventText)) return 'study';
+  if (looksLikeAdviceRequest(eventText)) return 'advice';
+  return 'other';
+}
+
+function shouldHandleViaBehavior(
+  meta: TalkMeta,
+  bindingId: string,
+  event: { text: string; userId?: string; userName?: string },
+): {
   handle: boolean;
   reason?: string;
-  behavior?: { responseMode?: 'off' | 'mentions' | 'all'; agentName?: string; onMessagePrompt?: string };
+  behavior?: {
+    responseMode?: 'off' | 'mentions' | 'all';
+    agentName?: string;
+    onMessagePrompt?: string;
+    deliveryMode?: 'thread' | 'channel' | 'adaptive';
+    responsePolicy?: {
+      triggerPolicy?: 'judgment' | 'study_entries_only' | 'advice_or_study';
+      allowedSenders?: string[];
+      minConfidence?: number;
+    };
+  };
+  intent?: 'study' | 'advice' | 'other';
 } {
   const behavior = resolveBehaviorForBinding(meta, bindingId);
   if (!behavior) {
     // Missing behavior row means "use default talk behavior" for this binding.
-    return { handle: true };
+    return { handle: true, intent: resolveMessageIntent(event.text) };
+  }
+
+  if (!senderAllowed(behavior, event)) {
+    return { handle: false, reason: 'sender-not-allowed' };
   }
 
   const responseMode = behavior.responseMode ?? 'all';
   if (responseMode === 'off') {
     return { handle: false, reason: 'on-message-disabled' };
   }
-  if (responseMode === 'mentions' && !messageLooksLikeMention(eventText)) {
+  if (responseMode === 'mentions' && !messageLooksLikeMention(event.text)) {
     return { handle: false, reason: 'mention-required' };
   }
 
-  return { handle: true, behavior };
+  const intent = resolveMessageIntent(event.text);
+  const triggerPolicy = behavior.responsePolicy?.triggerPolicy ?? 'judgment';
+  if (triggerPolicy === 'study_entries_only' && intent !== 'study') {
+    return { handle: false, reason: 'trigger-policy-no-match' };
+  }
+  if (triggerPolicy === 'advice_or_study' && intent === 'other') {
+    return { handle: false, reason: 'trigger-policy-no-match' };
+  }
+
+  return { handle: true, behavior, intent };
 }
 
 function buildRoleInstructions(agent: TalkAgent): string {
@@ -924,17 +1017,28 @@ async function sendSlackReply(params: {
   accountId?: string;
   message: string;
   sessionKey: string;
+  deliveryMode?: 'thread' | 'channel' | 'adaptive';
+  intent?: 'study' | 'advice' | 'other';
 }): Promise<void> {
   const resolvedAccountIdRaw = params.accountId ?? params.event.accountId;
   const resolvedAccountId = resolvedAccountIdRaw?.trim();
   if (!resolvedAccountId) {
     throw new Error('slack_account_context_required: Slack send requires a bound account context.');
   }
+  const deliveryMode = params.deliveryMode ?? 'thread';
+  const shouldReplyInThread =
+    deliveryMode === 'thread'
+      ? Boolean(params.event.threadTs)
+      : deliveryMode === 'adaptive'
+        ? (params.intent === 'advice' && Boolean(params.event.threadTs))
+        : false;
+  const threadTs = shouldReplyInThread ? params.event.threadTs : undefined;
+
   if (params.deps.sendSlackMessage) {
     const sent = await params.deps.sendSlackMessage({
       accountId: resolvedAccountId,
       channelId: params.event.channelId,
-      threadTs: params.event.threadTs,
+      threadTs,
       message: params.message,
     });
     if (!sent) {
@@ -965,7 +1069,7 @@ async function sendSlackReply(params: {
         channel: 'slack',
         target: `channel:${params.event.channelId}`,
         message: params.message,
-        ...(params.event.threadTs ? { replyTo: params.event.threadTs } : {}),
+        ...(threadTs ? { replyTo: threadTs } : {}),
         ...(resolvedAccountId ? { accountId: resolvedAccountId } : {}),
         bestEffort: true,
       },
@@ -1063,6 +1167,8 @@ async function processQueueItem(item: QueueItem, deps: SlackIngressDeps): Promis
       accountId: item.replyAccountId,
       message: reply,
       sessionKey,
+      deliveryMode: item.behaviorDeliveryMode,
+      intent: item.behaviorIntent,
     });
     item.replySent = true;
   }
@@ -1235,6 +1341,8 @@ function routeSlackIngressEvent(
     replyAccountId: event.accountId ?? ownerBinding?.accountId,
     behaviorAgentName: ownership.behaviorAgentName,
     behaviorOnMessagePrompt: ownership.behaviorOnMessagePrompt,
+    behaviorDeliveryMode: ownership.behaviorDeliveryMode,
+    behaviorIntent: ownership.behaviorIntent,
     attempt: 0,
     enqueuedAt: Date.now(),
     inboundContent: buildInboundMessage(event),
@@ -1257,7 +1365,7 @@ function routeSlackIngressEvent(
 }
 
 export function inspectSlackOwnership(
-  event: Pick<SlackIngressEvent, 'accountId' | 'channelId' | 'channelName' | 'outboundTarget' | 'eventId'> & { text?: string },
+  event: Pick<SlackIngressEvent, 'accountId' | 'channelId' | 'channelName' | 'outboundTarget' | 'eventId' | 'userId' | 'userName'> & { text?: string },
   store: TalkStore,
   logger: Logger,
 ): SlackOwnershipInspection {
@@ -1282,7 +1390,11 @@ export function inspectSlackOwnership(
     };
   }
 
-  const behaviorDecision = shouldHandleViaBehavior(ownerTalk, owner.binding.id, event.text ?? '');
+  const behaviorDecision = shouldHandleViaBehavior(ownerTalk, owner.binding.id, {
+    text: event.text ?? '',
+    userId: event.userId,
+    userName: event.userName,
+  });
   if (!behaviorDecision.handle) {
     return {
       decision: 'pass',
@@ -1298,6 +1410,8 @@ export function inspectSlackOwnership(
     bindingId: owner.binding.id,
     behaviorAgentName: behaviorDecision.behavior?.agentName,
     behaviorOnMessagePrompt: behaviorDecision.behavior?.onMessagePrompt,
+    behaviorDeliveryMode: behaviorDecision.behavior?.deliveryMode,
+    behaviorIntent: behaviorDecision.intent,
   };
 }
 

@@ -460,4 +460,136 @@ describe('slack ingress ownership hooks', () => {
       fetchSpy.mockRestore();
     }
   });
+
+  it('supports adaptive delivery: study updates post to channel, advice replies in thread', async () => {
+    const talk = store.createTalk('test-model');
+    const bindingId = 'binding-adaptive';
+    store.updateTalk(talk.id, {
+      platformBindings: [{
+        id: bindingId,
+        platform: 'slack',
+        accountId: 'kimfamily',
+        scope: 'channel:c888',
+        permission: 'read+write',
+        createdAt: Date.now(),
+      }],
+      platformBehaviors: [{
+        id: 'behavior-adaptive',
+        platformBindingId: bindingId,
+        responseMode: 'all',
+        deliveryMode: 'adaptive',
+        responsePolicy: { triggerPolicy: 'advice_or_study' },
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }],
+    });
+
+    const sendSlackMessage = jest.fn(async (_params: { accountId?: string; channelId: string; threadTs?: string; message: string }) => true);
+    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: 'ack' } }],
+      }),
+    } as unknown as Response);
+    try {
+      const deps = {
+        ...buildDeps(),
+        autoProcessQueue: true,
+        sendSlackMessage,
+      };
+
+      await handleSlackMessageReceivedHook(
+        {
+          from: 'slack:channel:C888',
+          content: '3h mathcounts practice',
+          metadata: {
+            to: 'channel:C888',
+            threadId: '1700000099.100',
+            messageId: '1700000099.100',
+            senderId: 'U888',
+            senderName: 'Asher',
+          },
+        },
+        {
+          channelId: 'slack',
+          accountId: 'kimfamily',
+        },
+        deps,
+      );
+
+      await handleSlackMessageReceivedHook(
+        {
+          from: 'slack:channel:C888',
+          content: 'can you help me plan tomorrow?',
+          metadata: {
+            to: 'channel:C888',
+            threadId: '1700000100.100',
+            messageId: '1700000100.100',
+            senderId: 'U888',
+            senderName: 'Asher',
+          },
+        },
+        {
+          channelId: 'slack',
+          accountId: 'kimfamily',
+        },
+        deps,
+      );
+
+      for (let i = 0; i < 50 && sendSlackMessage.mock.calls.length < 2; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      expect(sendSlackMessage.mock.calls.length).toBeGreaterThanOrEqual(2);
+      const firstCall = sendSlackMessage.mock.calls[0]?.[0] as { threadTs?: string } | undefined;
+      const secondCall = sendSlackMessage.mock.calls[1]?.[0] as { threadTs?: string } | undefined;
+      expect(firstCall?.threadTs).toBeUndefined();
+      expect(secondCall?.threadTs).toBe('1700000100.100');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('respects study_entries_only trigger policy and skips non-study chatter', async () => {
+    const talk = store.createTalk('test-model');
+    const bindingId = 'binding-trigger-policy';
+    store.updateTalk(talk.id, {
+      platformBindings: [{
+        id: bindingId,
+        platform: 'slack',
+        accountId: 'kimfamily',
+        scope: 'channel:c889',
+        permission: 'read+write',
+        createdAt: Date.now(),
+      }],
+      platformBehaviors: [{
+        id: 'behavior-trigger-policy',
+        platformBindingId: bindingId,
+        responseMode: 'all',
+        responsePolicy: { triggerPolicy: 'study_entries_only' },
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }],
+    });
+
+    const hookResult = await handleSlackMessageReceivedHook(
+      {
+        from: 'slack:channel:C889',
+        content: 'lol this is random chatter',
+        metadata: {
+          to: 'channel:C889',
+          messageId: '1700000101.100',
+          senderId: 'U889',
+          senderName: 'Asher',
+        },
+      },
+      {
+        channelId: 'slack',
+        accountId: 'kimfamily',
+      },
+      buildDeps(),
+    );
+
+    expect(hookResult).toBeUndefined();
+  });
 });

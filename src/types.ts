@@ -189,6 +189,28 @@ export interface TalkPlatformBehavior {
    * If omitted, auto-response is disabled for this binding.
    */
   onMessagePrompt?: string;
+  /**
+   * Delivery routing for Slack auto-responses.
+   * - thread: reply in inbound thread when available
+   * - channel: always post at top-level channel
+   * - adaptive: channel post for study updates, thread reply for advice/help
+   */
+  deliveryMode?: 'thread' | 'channel' | 'adaptive';
+  /**
+   * Optional response policy gates applied before model invocation.
+   */
+  responsePolicy?: {
+    /**
+     * - judgment: model decides if/how to respond
+     * - study_entries_only: only respond when message looks like study/work log
+     * - advice_or_study: respond for advice/help requests or study/work logs
+     */
+    triggerPolicy?: 'judgment' | 'study_entries_only' | 'advice_or_study';
+    /** Optional sender allow-list (display name and/or sender id). */
+    allowedSenders?: string[];
+    /** Reserved for future scoring-based gating. */
+    minConfidence?: number;
+  };
   createdAt: number;
   updatedAt: number;
 }

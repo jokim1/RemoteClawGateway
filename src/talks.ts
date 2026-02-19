@@ -246,6 +246,36 @@ function normalizeResponseModeInput(raw: unknown): 'off' | 'mentions' | 'all' | 
   return undefined;
 }
 
+function normalizeDeliveryModeInput(raw: unknown): 'thread' | 'channel' | 'adaptive' | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const value = raw.trim().toLowerCase();
+  if (value === 'thread' || value === 'channel' || value === 'adaptive') return value;
+  return undefined;
+}
+
+function normalizeTriggerPolicyInput(raw: unknown): 'judgment' | 'study_entries_only' | 'advice_or_study' | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const value = raw.trim().toLowerCase();
+  if (value === 'judgment' || value === 'study_entries_only' || value === 'advice_or_study') return value;
+  return undefined;
+}
+
+function normalizeAllowedSendersInput(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue;
+    const value = entry.trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
 function normalizeToolNameListInput(raw: unknown): string[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const seen = new Set<string>();
@@ -344,6 +374,15 @@ function mapChannelResponseSettingsInput(input: unknown): unknown {
         : undefined);
     const autoRespond =
       typeof row.autoRespond === 'boolean' ? row.autoRespond : undefined;
+    const deliveryMode = normalizeDeliveryModeInput(row.deliveryMode);
+    const responsePolicy = row.responsePolicy && typeof row.responsePolicy === 'object'
+      ? (row.responsePolicy as Record<string, unknown>)
+      : undefined;
+    const triggerPolicy = normalizeTriggerPolicyInput(responsePolicy?.triggerPolicy);
+    const allowedSenders = normalizeAllowedSendersInput(responsePolicy?.allowedSenders);
+    const minConfidence = typeof responsePolicy?.minConfidence === 'number'
+      ? responsePolicy.minConfidence
+      : undefined;
 
     return {
       ...row,
@@ -352,6 +391,18 @@ function mapChannelResponseSettingsInput(input: unknown): unknown {
       ...(responseInstruction ? { onMessagePrompt: responseInstruction } : {}),
       ...(responseMode !== undefined ? { responseMode } : {}),
       ...(autoRespond !== undefined ? { autoRespond } : {}),
+      ...(deliveryMode !== undefined ? { deliveryMode } : {}),
+      ...(
+        triggerPolicy !== undefined || allowedSenders !== undefined || minConfidence !== undefined
+          ? {
+              responsePolicy: {
+                ...(triggerPolicy !== undefined ? { triggerPolicy } : {}),
+                ...(allowedSenders !== undefined ? { allowedSenders } : {}),
+                ...(minConfidence !== undefined ? { minConfidence } : {}),
+              },
+            }
+          : {}
+      ),
     };
   });
 }
@@ -948,11 +999,40 @@ export function normalizeAndValidatePlatformBehaviorsInput(
     const responseMode =
       normalizeResponseModeInput(row.responseMode) ??
       (autoRespond === false ? 'off' : autoRespond === true ? 'all' : undefined);
-    if (!agentName && !onMessagePrompt && responseMode === undefined) {
+    const deliveryMode = normalizeDeliveryModeInput(row.deliveryMode);
+    const responsePolicyRaw =
+      row.responsePolicy && typeof row.responsePolicy === 'object'
+        ? row.responsePolicy as Record<string, unknown>
+        : undefined;
+    const triggerPolicy = normalizeTriggerPolicyInput(responsePolicyRaw?.triggerPolicy);
+    const allowedSenders = normalizeAllowedSendersInput(responsePolicyRaw?.allowedSenders);
+    const minConfidence = typeof responsePolicyRaw?.minConfidence === 'number'
+      ? responsePolicyRaw.minConfidence
+      : undefined;
+
+    if (responsePolicyRaw && triggerPolicy === undefined && allowedSenders === undefined && minConfidence === undefined) {
       return {
         ok: false,
         error:
-          `platformBehaviors[${i + 1}] must define agentName and/or onMessagePrompt, or set responseMode=off.`,
+          `platformBehaviors[${i + 1}].responsePolicy is invalid. ` +
+          'Expected triggerPolicy, allowedSenders array, and/or numeric minConfidence.',
+      };
+    }
+
+    if (
+      !agentName &&
+      !onMessagePrompt &&
+      responseMode === undefined &&
+      deliveryMode === undefined &&
+      triggerPolicy === undefined &&
+      allowedSenders === undefined &&
+      minConfidence === undefined
+    ) {
+      return {
+        ok: false,
+        error:
+          `platformBehaviors[${i + 1}] must define at least one behavior field ` +
+          '(agentName, onMessagePrompt, responseMode, deliveryMode, or responsePolicy).',
       };
     }
 
@@ -966,6 +1046,18 @@ export function normalizeAndValidatePlatformBehaviorsInput(
       ...(responseMode !== undefined ? { responseMode } : {}),
       ...(agentName ? { agentName } : {}),
       ...(onMessagePrompt ? { onMessagePrompt } : {}),
+      ...(deliveryMode !== undefined ? { deliveryMode } : {}),
+      ...(
+        triggerPolicy !== undefined || allowedSenders !== undefined || minConfidence !== undefined
+          ? {
+              responsePolicy: {
+                ...(triggerPolicy !== undefined ? { triggerPolicy } : {}),
+                ...(allowedSenders !== undefined ? { allowedSenders } : {}),
+                ...(minConfidence !== undefined ? { minConfidence } : {}),
+              },
+            }
+          : {}
+      ),
       createdAt,
       updatedAt,
     });

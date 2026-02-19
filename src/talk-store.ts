@@ -66,6 +66,34 @@ function normalizeResponseMode(raw: unknown): 'off' | 'mentions' | 'all' | undef
   return undefined;
 }
 
+function normalizeDeliveryMode(raw: unknown): 'thread' | 'channel' | 'adaptive' | undefined {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (value === 'thread' || value === 'channel' || value === 'adaptive') return value;
+  return undefined;
+}
+
+function normalizeTriggerPolicy(raw: unknown): 'judgment' | 'study_entries_only' | 'advice_or_study' | undefined {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (value === 'judgment' || value === 'study_entries_only' || value === 'advice_or_study') return value;
+  return undefined;
+}
+
+function normalizeAllowedSenders(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue;
+    const value = entry.trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 function normalizeExecutionMode(raw: unknown): 'openclaw' | 'full_control' {
   const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
   if (value === 'openclaw' || value === 'full_control') return value;
@@ -253,7 +281,26 @@ function normalizePlatformBehaviors(
       const responseMode =
         normalizeResponseMode(row.responseMode) ??
         (autoRespond === false ? 'off' : autoRespond === true ? 'all' : undefined);
-      if (!agentName && !onMessagePrompt && responseMode === undefined) return null;
+      const deliveryMode = normalizeDeliveryMode(row.deliveryMode);
+      const responsePolicyRaw =
+        row.responsePolicy && typeof row.responsePolicy === 'object'
+          ? row.responsePolicy as Record<string, unknown>
+          : undefined;
+      const triggerPolicy = normalizeTriggerPolicy(responsePolicyRaw?.triggerPolicy);
+      const allowedSenders = normalizeAllowedSenders(responsePolicyRaw?.allowedSenders);
+      const minConfidence =
+        typeof responsePolicyRaw?.minConfidence === 'number'
+          ? responsePolicyRaw.minConfidence
+          : undefined;
+      if (
+        !agentName &&
+        !onMessagePrompt &&
+        responseMode === undefined &&
+        deliveryMode === undefined &&
+        triggerPolicy === undefined &&
+        allowedSenders === undefined &&
+        minConfidence === undefined
+      ) return null;
 
       const id =
         typeof row.id === 'string' && row.id.trim()
@@ -266,6 +313,18 @@ function normalizePlatformBehaviors(
         ...(responseMode !== undefined ? { responseMode } : {}),
         ...(agentName ? { agentName } : {}),
         ...(onMessagePrompt ? { onMessagePrompt } : {}),
+        ...(deliveryMode !== undefined ? { deliveryMode } : {}),
+        ...(
+          triggerPolicy !== undefined || allowedSenders !== undefined || minConfidence !== undefined
+            ? {
+                responsePolicy: {
+                  ...(triggerPolicy !== undefined ? { triggerPolicy } : {}),
+                  ...(allowedSenders !== undefined ? { allowedSenders } : {}),
+                  ...(minConfidence !== undefined ? { minConfidence } : {}),
+                },
+              }
+            : {}
+        ),
         createdAt: typeof row.createdAt === 'number' ? row.createdAt : now,
         updatedAt: typeof row.updatedAt === 'number' ? row.updatedAt : now,
       } satisfies PlatformBehavior;

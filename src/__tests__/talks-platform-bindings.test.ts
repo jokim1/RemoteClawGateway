@@ -138,6 +138,45 @@ describe('normalizeAndValidatePlatformBehaviorsInput', () => {
     });
   });
 
+  it('accepts deliveryMode and responsePolicy fields', () => {
+    const bindingId = randomUUID();
+    const result = normalizeAndValidatePlatformBehaviorsInput(
+      [{
+        platformBindingId: bindingId,
+        responseMode: 'all',
+        deliveryMode: 'adaptive',
+        responsePolicy: {
+          triggerPolicy: 'advice_or_study',
+          allowedSenders: ['Asher', 'Jaxon'],
+          minConfidence: 0.7,
+        },
+      }],
+      {
+        bindings: [{
+          id: bindingId,
+          platform: 'slack',
+          scope: 'channel:C123',
+          permission: 'read+write',
+          createdAt: Date.now(),
+        }],
+        agents: [],
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.behaviors[0]).toMatchObject({
+      platformBindingId: bindingId,
+      responseMode: 'all',
+      deliveryMode: 'adaptive',
+      responsePolicy: {
+        triggerPolicy: 'advice_or_study',
+        allowedSenders: ['Asher', 'Jaxon'],
+        minConfidence: 0.7,
+      },
+    });
+  });
+
   it('rejects behavior rows with unknown binding or unknown agent', () => {
     const unknownBinding = normalizeAndValidatePlatformBehaviorsInput(
       [{ platformBindingId: 'missing-binding', onMessagePrompt: 'Hi' }],
