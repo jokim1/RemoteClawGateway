@@ -518,7 +518,8 @@ function normalizeDiagnosticCategory(raw: unknown): TalkDiagnosticCategory {
     value === 'filesystem' ||
     value === 'tools' ||
     value === 'routing' ||
-    value === 'slack'
+    value === 'slack' ||
+    value === 'intent'
   ) return value;
   return 'other';
 }

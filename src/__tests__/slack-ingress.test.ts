@@ -894,4 +894,110 @@ describe('slack ingress ownership hooks', () => {
       fetchSpy.mockRestore();
     }
   });
+
+  it('blocks mismatched set intent and records intent diagnostic', async () => {
+    const talk = store.createTalk('test-model');
+    const bindingId = 'binding-intent-verification';
+    store.updateTalk(talk.id, {
+      stateBackend: 'stream_store',
+      defaultStateStream: 'kids_study',
+      platformBindings: [{
+        id: bindingId,
+        platform: 'slack',
+        accountId: 'kimfamily',
+        scope: 'channel:c893',
+        permission: 'read+write',
+        createdAt: Date.now(),
+      }],
+      platformBehaviors: [{
+        id: 'behavior-intent-verification',
+        platformBindingId: bindingId,
+        responseMode: 'all',
+        deliveryMode: 'channel',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }],
+    });
+
+    const sendSlackMessage = jest.fn(async (_params: { accountId?: string; channelId: string; threadTs?: string; message: string }) => true);
+    let completionCall = 0;
+    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input: unknown) => {
+      if (String(input).includes('/v1/chat/completions')) {
+        completionCall += 1;
+        if (completionCall === 1) {
+          return {
+            ok: true,
+            json: async () => ({
+              choices: [{
+                finish_reason: 'tool_calls',
+                message: {
+                  content: '',
+                  tool_calls: [{
+                    id: 'tc1',
+                    type: 'function',
+                    function: {
+                      name: 'state_append_event',
+                      arguments: JSON.stringify({
+                        talk_id: talk.id,
+                        stream: 'kids_study',
+                        event_type: 'manual_adjustment',
+                        payload: { kid: 'Asher', target: 360 },
+                      }),
+                    },
+                  }],
+                },
+              }],
+            }),
+          } as unknown as Response;
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { content: "Set Asher's weekly study time to 360 minutes." } }],
+          }),
+        } as unknown as Response;
+      }
+      throw new Error(`unexpected fetch call: ${String(input)}`);
+    });
+    try {
+      const deps = {
+        ...buildDeps(),
+        autoProcessQueue: true,
+        sendSlackMessage,
+      };
+
+      await handleSlackMessageReceivedHook(
+        {
+          from: 'slack:channel:C893',
+          content: "Kimi pls set asher's weekly study time to 360 minutes",
+          metadata: {
+            to: 'channel:C893',
+            messageId: '1700000105.100',
+            senderId: 'U893',
+            senderName: 'Big Bad Daddy',
+          },
+        },
+        {
+          channelId: 'slack',
+          accountId: 'kimfamily',
+        },
+        deps,
+      );
+
+      for (let i = 0; i < 50 && sendSlackMessage.mock.calls.length < 1; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      expect(sendSlackMessage).toHaveBeenCalled();
+      const sent = sendSlackMessage.mock.calls[0]?.[0] as { message?: string } | undefined;
+      expect(sent?.message ?? '').toContain('I could not verify the requested set action safely.');
+      expect(sent?.message ?? '').toContain('state write changed a target/goal field instead of a running total');
+
+      const updated = store.getTalk(talk.id);
+      const diagnostics = updated?.diagnostics ?? [];
+      expect(diagnostics.some((entry) => entry.category === 'intent' && entry.code === 'INTENT_STATE_MISMATCH')).toBe(true);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
 });

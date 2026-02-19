@@ -19,6 +19,7 @@ import { collectRoutingDiagnostics } from './model-routing-diagnostics.js';
 import { runToolLoopNonStreaming } from './tool-loop.js';
 import { getToolCatalog } from './tool-catalog.js';
 import { googleDocsAuthStatusForProfile } from './google-docs.js';
+import { verifyIntentOutcome } from './intent-outcome-verifier.js';
 import {
   evaluateToolAvailability,
   resolveExecutionMode,
@@ -1063,6 +1064,13 @@ async function callLlmForEvent(params: {
   sessionKey: string;
   agentName?: string;
   agentRole?: TalkAgent['role'];
+  executedTools: Array<{
+    requestedName: string;
+    executedName: string;
+    rawArguments: string;
+    resultSuccess: boolean;
+    resultContent: string;
+  }>;
 }> {
   const { deps, talkId, event } = params;
   const meta = deps.store.getTalk(talkId);
@@ -1094,10 +1102,15 @@ async function callLlmForEvent(params: {
   });
 
   const behaviorPrompt = params.behaviorOnMessagePrompt?.trim();
+  const slackDeliveryGuardrails =
+    'Slack delivery for this inbound event is handled by ClawTalk gateway. ' +
+    'Do not call Slack/channel messaging tools (for example `message` send/post/reply). ' +
+    'Return only the response text and let gateway post it.';
   const systemPrompt = behaviorPrompt
     ? `${baseSystemPrompt}\n\n` +
-      `Platform inbound behavior (Slack binding specific):\n${behaviorPrompt}`
-    : baseSystemPrompt;
+      `Platform inbound behavior (Slack binding specific):\n${behaviorPrompt}\n\n` +
+      `Delivery guardrails:\n${slackDeliveryGuardrails}`
+    : `${baseSystemPrompt}\n\nDelivery guardrails:\n${slackDeliveryGuardrails}`;
   const systemPromptBytes = Buffer.byteLength(systemPrompt ?? '', 'utf-8');
   const historyBudgetBytes = Math.max(
     MIN_HISTORY_BUDGET_BYTES,
@@ -1128,6 +1141,9 @@ async function callLlmForEvent(params: {
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    // Force model runs for Slack ingress through generic chat context rather than
+    // channel-native message tool context.
+    'x-openclaw-message-channel': 'webchat',
   };
   const traceId = randomUUID();
   if (deps.authToken) {
@@ -1195,6 +1211,9 @@ async function callLlmForEvent(params: {
         agentId: resolvedHeaderAgentId ?? 'main',
       });
   headers['x-openclaw-trace-id'] = traceId;
+  if (event.accountId?.trim()) {
+    headers['x-openclaw-account-id'] = event.accountId.trim();
+  }
   // In full_control mode, avoid OpenClaw embedded runtime routing so gateway tools remain callable.
   if (talkExecutionMode !== 'full_control') {
     headers['x-openclaw-session-key'] = sessionKey;
@@ -1245,6 +1264,7 @@ async function callLlmForEvent(params: {
     sessionKey,
     agentName: selectedAgent?.name,
     agentRole: selectedAgent?.role,
+    executedTools: result.executedTools,
   };
 }
 
@@ -1466,7 +1486,7 @@ async function recordTalkDiagnostic(params: {
   deps: SlackIngressDeps;
   item: QueueItem;
   code: string;
-  category: 'state' | 'filesystem' | 'tools' | 'routing' | 'slack' | 'other';
+  category: 'state' | 'filesystem' | 'tools' | 'routing' | 'slack' | 'intent' | 'other';
   title: string;
   message: string;
   assumptionKey?: string;
@@ -1554,6 +1574,30 @@ async function processQueueItem(item: QueueItem, deps: SlackIngressDeps): Promis
     item.sessionKey = generated.sessionKey;
     item.agentName = generated.agentName;
     item.agentRole = generated.agentRole;
+
+    const verification = verifyIntentOutcome({
+      userText: item.event.text,
+      assistantReply: generated.reply,
+      executedTools: generated.executedTools,
+    });
+    if (!verification.ok) {
+      await recordTalkDiagnostic({
+        deps,
+        item,
+        code: verification.code,
+        category: 'intent',
+        title: verification.title,
+        message: verification.message,
+        details: {
+          eventId: item.event.eventId,
+          channelId: item.event.channelId,
+          accountId: item.replyAccountId ?? item.event.accountId ?? '',
+          ...verification.details,
+        },
+        assumptionKey: `intent:mismatch:${verification.code.toLowerCase()}`,
+      });
+      item.reply = verification.correctedReply;
+    }
   }
   const assumption = detectAssumptionMismatch(item.reply ?? '');
   if (assumption) {

@@ -843,6 +843,13 @@ export interface ToolLoopNonStreamResult {
   fullContent: string;
   responseModel: string | undefined;
   usage: { prompt_tokens: number; completion_tokens: number } | undefined;
+  executedTools: Array<{
+    requestedName: string;
+    executedName: string;
+    rawArguments: string;
+    resultSuccess: boolean;
+    resultContent: string;
+  }>;
 }
 
 /**
@@ -855,6 +862,13 @@ export async function runToolLoopNonStreaming(opts: ToolLoopNonStreamOptions): P
   let responseModel: string | undefined;
   let lastUsage: { prompt_tokens: number; completion_tokens: number } | undefined;
   let continuations = 0;
+  const executedTools: Array<{
+    requestedName: string;
+    executedName: string;
+    rawArguments: string;
+    resultSuccess: boolean;
+    resultContent: string;
+  }> = [];
 
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
     const headers: Record<string, string> = {
@@ -925,6 +939,13 @@ export async function runToolLoopNonStreaming(opts: ToolLoopNonStreamOptions): P
           opts.talkId,
         );
         const result = await executor.execute(routed.executeName, routed.executeArgsJson);
+        executedTools.push({
+          requestedName: tc.function.name,
+          executedName: routed.executeName,
+          rawArguments: tc.function.arguments,
+          resultSuccess: result.success,
+          resultContent: result.content,
+        });
         messages.push({
           role: 'tool',
           content: result.content,
@@ -953,5 +974,5 @@ export async function runToolLoopNonStreaming(opts: ToolLoopNonStreamOptions): P
     break;
   }
 
-  return { fullContent, responseModel, usage: lastUsage };
+  return { fullContent, responseModel, usage: lastUsage, executedTools };
 }

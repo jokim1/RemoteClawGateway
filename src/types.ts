@@ -335,7 +335,7 @@ export interface TalkStateSnapshot {
 }
 
 export type TalkDiagnosticStatus = 'open' | 'resolved' | 'dismissed';
-export type TalkDiagnosticCategory = 'state' | 'filesystem' | 'tools' | 'routing' | 'slack' | 'other';
+export type TalkDiagnosticCategory = 'state' | 'filesystem' | 'tools' | 'routing' | 'slack' | 'intent' | 'other';
 
 export interface TalkDiagnosticIssue {
   id: string;
