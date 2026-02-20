@@ -41,11 +41,12 @@ const DEFAULT_RETRY_ATTEMPTS = 3;
 const DEFAULT_RETRY_BASE_MS = 1_000;
 const DEFAULT_MAX_QUEUE = 1_000;
 const DEFAULT_SUPPRESS_TTL_MS = 120_000;
-const DEFAULT_SUPPRESS_MAX_CANCELS = 3;
+const DEFAULT_SUPPRESS_MAX_CANCELS = 10;
+const SUPPRESS_REFRESH_INTERVAL_MS = 30_000;
 const DEFAULT_PROCESS_TIMEOUT_MS = 300_000;
 const SLACK_DEFAULT_ACCOUNT = 'default';
 
-type SlackIngressEvent = {
+export type SlackIngressEvent = {
   eventId: string;
   accountId?: string;
   channelId: string;
@@ -162,7 +163,7 @@ export type SlackIngressTalkRuntimeSnapshot = {
   }>;
 };
 
-type SlackIngressDeps = {
+export type SlackIngressDeps = {
   store: TalkStore;
   registry: ToolRegistry;
   executor: ToolExecutor;
@@ -214,9 +215,11 @@ type OutboundSuppressionLease = {
   createdAt: number;
   expiresAt: number;
   remainingCancels: number;
+  /** Number of OpenClaw outbound messages that were suppressed by this lease. */
+  consumedCount: number;
 };
 
-type SlackOwnershipDecision = {
+export type SlackOwnershipDecision = {
   decision: 'handled' | 'pass';
   eventId: string;
   talkId?: string;
@@ -585,14 +588,18 @@ function upsertOutboundSuppression(event: SlackIngressEvent, talkId: string): vo
 
   const now = Date.now();
   const key = buildSuppressionKey(event.accountId, normalizedTarget);
+  const existing = outboundSuppressions.get(key);
+  // Preserve consumedCount across refreshes so we know how many messages were suppressed.
+  const consumedCount = existing?.eventId === event.eventId ? existing.consumedCount : 0;
   outboundSuppressions.set(key, {
     eventId: event.eventId,
     talkId,
     target: normalizedTarget,
     accountId: event.accountId,
-    createdAt: now,
+    createdAt: existing?.eventId === event.eventId ? existing.createdAt : now,
     expiresAt: now + getSuppressionTtlMs(),
     remainingCancels: getSuppressionMaxCancels(),
+    consumedCount,
   });
 }
 
@@ -613,7 +620,7 @@ function buildEventId(input: {
   return base.join(':');
 }
 
-function parseSlackIngressEvent(raw: unknown): SlackIngressEvent | null {
+export function parseSlackIngressEvent(raw: unknown): SlackIngressEvent | null {
   if (!raw || typeof raw !== 'object') return null;
   const body = raw as Record<string, unknown>;
   const channelId = normalizeText(body.channelId);
@@ -1798,6 +1805,16 @@ async function processQueueItem(item: QueueItem, deps: SlackIngressDeps): Promis
   if (!item.reply || !item.sessionKey || !item.model) {
     const llmStartedAt = Date.now();
     emitSlackIngressPhase({ deps, item, phase: 'llm_request_started' });
+
+    // Refresh the outbound suppression before the LLM call starts so the
+    // TTL window covers the full processing time. A periodic heartbeat
+    // keeps the lease alive during long tool-loop executions.
+    upsertOutboundSuppression(item.event, item.talkId);
+    const suppressionHeartbeat = setInterval(() => {
+      upsertOutboundSuppression(item.event, item.talkId);
+    }, SUPPRESS_REFRESH_INTERVAL_MS);
+    suppressionHeartbeat.unref?.();
+
     let generated: Awaited<ReturnType<typeof callLlmForEvent>>;
     try {
       generated = await callLlmForEvent({
@@ -1830,7 +1847,12 @@ async function processQueueItem(item: QueueItem, deps: SlackIngressDeps): Promis
         message: classified.message,
         cause: err,
       });
+    } finally {
+      clearInterval(suppressionHeartbeat);
     }
+
+    // One final refresh after LLM completes to cover the send phase.
+    upsertOutboundSuppression(item.event, item.talkId);
     item.reply = generated.reply;
     item.model = generated.model;
     item.sessionKey = generated.sessionKey;
@@ -1888,6 +1910,19 @@ async function processQueueItem(item: QueueItem, deps: SlackIngressDeps): Promis
     const sessionKey = item.sessionKey;
     if (!reply || !sessionKey) {
       throw new Error('reply payload missing');
+    }
+    // Check if the suppression lease is still active. If it expired or was
+    // fully consumed, OpenClaw may have already sent its own reply.
+    const suppressionTarget = normalizeTarget(item.event.outboundTarget ?? buildDefaultOutboundTarget(item.event.channelId));
+    if (suppressionTarget) {
+      const suppressionKey = buildSuppressionKey(item.event.accountId, suppressionTarget);
+      const activeSuppression = outboundSuppressions.get(suppressionKey);
+      if (!activeSuppression || activeSuppression.eventId !== item.event.eventId) {
+        deps.logger.warn(
+          `SlackIngress: suppression expired/missing before reply send for event=${item.event.eventId} ` +
+          `talk=${item.talkId} — possible duplicate message from OpenClaw`,
+        );
+      }
     }
     const sendStartedAt = Date.now();
     emitSlackIngressPhase({ deps, item, phase: 'send_started' });
@@ -1963,6 +1998,12 @@ function scheduleRetry(item: QueueItem, deps: SlackIngressDeps, err: unknown): v
   if (nextAttempt >= maxAttempts) {
     if (!item.replySent) {
       seenEvents.delete(item.event.eventId);
+      // Clear the suppression so OpenClaw can resume normal outbound delivery
+      // for this channel. Without this, the channel stays silenced until TTL expires.
+      const suppressionTarget = normalizeTarget(item.event.outboundTarget ?? buildDefaultOutboundTarget(item.event.channelId));
+      if (suppressionTarget) {
+        outboundSuppressions.delete(buildSuppressionKey(item.event.accountId, suppressionTarget));
+      }
     }
     void writeDeadLetter({ deps, item, error: err }).catch(() => {});
     emitSlackIngressPhase({
@@ -2068,7 +2109,7 @@ async function processQueue(deps: SlackIngressDeps): Promise<void> {
   }
 }
 
-function routeSlackIngressEvent(
+export function routeSlackIngressEvent(
   event: SlackIngressEvent,
   deps: SlackIngressDeps,
 ): { statusCode: number; payload: SlackOwnershipDecision } {
@@ -2339,6 +2380,7 @@ function consumeOutboundSuppression(
   }
 
   lease.remainingCancels -= 1;
+  lease.consumedCount += 1;
   if (lease.remainingCancels <= 0) {
     outboundSuppressions.delete(matchedKey);
   }

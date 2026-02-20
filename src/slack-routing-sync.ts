@@ -113,7 +113,10 @@ function buildManagedBinding(entry: DesiredBinding): Record<string, unknown> {
   };
 }
 
-export async function reconcileSlackRoutingForTalks(talks: TalkMeta[], logger: Logger): Promise<void> {
+export async function reconcileSlackRoutingForTalks(
+  talks: TalkMeta[],
+  logger: Logger,
+): Promise<void> {
   const configPath = path.join(process.env.HOME ?? '', '.openclaw', 'openclaw.json');
   if (!configPath || configPath === '.openclaw/openclaw.json') return;
 
@@ -179,6 +182,28 @@ export async function reconcileSlackRoutingForTalks(talks: TalkMeta[], logger: L
     const accountChannels = ensureObjectPath(accountRoot, 'channels');
     const channelRow = ensureObjectPath(accountChannels, entry.peer.id);
     channelRow.requireMention = entry.requireMention;
+  }
+
+  // When any Talk has Slack bindings, ensure OpenClaw runs Slack in HTTP mode
+  // so Gateway can act as the event proxy (Option C architecture).
+  // The signing secret is required for HTTP mode and is resolved from env or config.
+  if (desired.length > 0) {
+    const seenAccounts = new Set(desired.map(d => d.accountId));
+    for (const accountId of seenAccounts) {
+      const accountRoot = ensureObjectPath(accountsRoot, accountId);
+      if (accountRoot.mode !== 'http') {
+        accountRoot.mode = 'http';
+        logger.info(`ClawTalk: set Slack account "${accountId}" to HTTP mode for event proxy`);
+      }
+      // Signing secret: prefer env var, fall back to existing config value
+      if (!accountRoot.signingSecret) {
+        const envSecret = process.env.GATEWAY_SLACK_SIGNING_SECRET?.trim()
+          || process.env.SLACK_SIGNING_SECRET?.trim();
+        if (envSecret) {
+          accountRoot.signingSecret = envSecret;
+        }
+      }
+    }
   }
 
   const next = `${JSON.stringify(cfg, null, 2)}\n`;

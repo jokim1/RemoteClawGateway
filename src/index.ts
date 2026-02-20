@@ -43,6 +43,8 @@ import { reconcileSlackRoutingForTalks } from './slack-routing-sync.js';
 import { reconcileAnthropicProxyBaseUrls, reconcileGatewayResponsesEndpoint } from './provider-baseurl-sync.js';
 import { registerOpenClawNativeGoogleTools } from './openclaw-native-tools.js';
 import { listSlackAccountIds, resolveSlackBotTokenForAccount } from './slack-auth.js';
+import { handleSlackEventProxy, resolveOpenClawWebhookUrl } from './slack-event-proxy.js';
+import { checkSlackProxySetup, logSlackProxySetupStatus } from './slack-proxy-setup.js';
 
 // ---------------------------------------------------------------------------
 // Node.js 25 fetch fix — replace built-in undici connector to fix Tailscale IP
@@ -82,6 +84,8 @@ const ROUTES = new Set([
   '/api/debug/slack/recent',
   '/api/status/clawtalk',
   '/api/sync/stream',
+  '/slack/events',
+  '/api/events/slack/proxy-setup',
 ]);
 
 type SlackDebugPath = 'slack-ingress' | 'event-reply' | 'openclaw-message';
@@ -642,6 +646,9 @@ const plugin = {
         readyPhase = 'reconciling_routes';
         appendSyncEvent('gateway_phase', { phase: readyPhase });
         await reconcileSlackRoutingForTalks(talkStore.listTalks(), api.logger);
+        // Check and log Slack event proxy setup status
+        const proxyCfg = api.runtime.config.loadConfig();
+        logSlackProxySetupStatus(talkStore, proxyCfg, api.logger);
         readyPhase = 'ready';
         appendSyncEvent('gateway_phase', { phase: readyPhase });
       })
@@ -1097,7 +1104,8 @@ const plugin = {
           || url.pathname === '/api/events/slack'
           || url.pathname === '/api/events/slack/resolve'
           || url.pathname === '/api/events/slack/doctor'
-          || url.pathname === '/api/events/slack/status';
+          || url.pathname === '/api/events/slack/status'
+          || url.pathname === '/slack/events';
         if (readinessGated && !isGatewayReady()) {
           const retryAfterSec = 2;
           res.setHeader('Retry-After', String(retryAfterSec));
@@ -1378,6 +1386,16 @@ const plugin = {
             });
             break;
           }
+          case '/api/events/slack/proxy-setup': {
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              break;
+            }
+            const setupCfg = api.runtime.config.loadConfig();
+            const setupStatus = checkSlackProxySetup(talkStore, setupCfg);
+            sendJson(res, 200, setupStatus);
+            break;
+          }
           case '/api/events/slack': {
             const host = req.headers.host ?? 'localhost:18789';
             const gatewayOrigin = `http://${host}`;
@@ -1416,6 +1434,23 @@ const plugin = {
           case '/api/realtime-voice/capabilities':
             await handleRealtimeVoiceCapabilities(ctx);
             break;
+          case '/slack/events': {
+            const host = req.headers.host ?? 'localhost:18789';
+            const gatewayOrigin = `http://${host}`;
+            const gatewayToken = resolveGatewayToken(cfg);
+            await handleSlackEventProxy(req, res, {
+              store: talkStore,
+              logger: api.logger,
+              getConfig: () => api.runtime.config.loadConfig(),
+              openclawWebhookUrl: resolveOpenClawWebhookUrl(cfg),
+              buildIngressDeps: () => ({
+                ...buildSlackIngressDeps(),
+                gatewayOrigin,
+                authToken: gatewayToken,
+              }),
+            });
+            break;
+          }
         }
 
         return true;
