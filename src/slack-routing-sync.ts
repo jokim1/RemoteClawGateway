@@ -195,12 +195,16 @@ export async function reconcileSlackRoutingForTalks(
         accountRoot.mode = 'http';
         logger.info(`ClawTalk: set Slack account "${accountId}" to HTTP mode for event proxy`);
       }
-      // Signing secret: prefer env var, fall back to existing config value
+      // Signing secret: prefer env var, then base-level config, then leave as-is
       if (!accountRoot.signingSecret) {
         const envSecret = process.env.GATEWAY_SLACK_SIGNING_SECRET?.trim()
           || process.env.SLACK_SIGNING_SECRET?.trim();
-        if (envSecret) {
-          accountRoot.signingSecret = envSecret;
+        const baseSecret = typeof slackRoot.signingSecret === 'string'
+          ? slackRoot.signingSecret.trim() : '';
+        const fallback = envSecret || baseSecret;
+        if (fallback) {
+          accountRoot.signingSecret = fallback;
+          logger.info(`ClawTalk: propagated signing secret to account "${accountId}" from ${envSecret ? 'env' : 'base config'}`);
         }
       }
     }
