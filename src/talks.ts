@@ -1617,14 +1617,32 @@ async function handleGetTalkTools(
     googleAuthProfile: talk.googleAuthProfile,
     getToolRequiredAuth: (toolName) => catalog.getToolRequiredAuth(toolName),
   });
-  const effectiveToolStates = evaluateToolAvailability(allTools, talk, {
-    isInstalled: (toolName) => catalog.isToolEnabled(toolName),
+  const availabilityOptions = {
+    isInstalled: (toolName: string) => catalog.isToolEnabled(toolName),
     isAuthReady,
-    isManagedTool: (toolName) => catalog.isManagedTool(toolName),
+    isManagedTool: (toolName: string) => catalog.isManagedTool(toolName),
     proxyGatewayToolsEnabled,
-    isOpenClawNativeTool: (toolName) => isOpenClawNativeGoogleTool(toolName),
+    isOpenClawNativeTool: (toolName: string) => isOpenClawNativeGoogleTool(toolName),
     openClawNativeToolsEnabled,
-  });
+  };
+  const effectiveToolStates = evaluateToolAvailability(allTools, talk, availabilityOptions);
+  const openclawStates = evaluateToolAvailability(
+    allTools,
+    { ...talk, executionMode: 'openclaw' as const },
+    availabilityOptions,
+  );
+  const fullControlStates = evaluateToolAvailability(
+    allTools,
+    { ...talk, executionMode: 'full_control' as const },
+    availabilityOptions,
+  );
+  const openclawByName = new Map(openclawStates.map((t) => [t.name, t]));
+  const fullControlByName = new Map(fullControlStates.map((t) => [t.name, t]));
+  const effectiveToolsWithModes = effectiveToolStates.map((tool) => ({
+    ...tool,
+    openclawStatus: openclawByName.get(tool.name)?.enabled ? 'on' as const : 'blocked' as const,
+    clawtalkStatus: fullControlByName.get(tool.name)?.enabled ? 'on' as const : 'blocked' as const,
+  }));
   const enabledTools = effectiveToolStates
     .filter((tool) => tool.enabled)
     .map(({ name, description, builtin }) => ({ name, description, builtin }));
@@ -1652,7 +1670,7 @@ async function handleGetTalkTools(
     defaultStateStream: talk.defaultStateStream,
     availableTools: allTools,
     enabledTools,
-    effectiveTools: effectiveToolStates,
+    effectiveTools: effectiveToolsWithModes,
     capabilities,
   });
 }
@@ -1759,14 +1777,32 @@ async function handleUpdateTalkTools(
     googleAuthProfile: updated.googleAuthProfile,
     getToolRequiredAuth: (toolName) => catalog.getToolRequiredAuth(toolName),
   });
-  const effectiveToolStates = evaluateToolAvailability(allTools, updated, {
-    isInstalled: (toolName) => catalog.isToolEnabled(toolName),
+  const availabilityOptions = {
+    isInstalled: (toolName: string) => catalog.isToolEnabled(toolName),
     isAuthReady,
-    isManagedTool: (toolName) => catalog.isManagedTool(toolName),
+    isManagedTool: (toolName: string) => catalog.isManagedTool(toolName),
     proxyGatewayToolsEnabled,
-    isOpenClawNativeTool: (toolName) => isOpenClawNativeGoogleTool(toolName),
+    isOpenClawNativeTool: (toolName: string) => isOpenClawNativeGoogleTool(toolName),
     openClawNativeToolsEnabled,
-  });
+  };
+  const effectiveToolStates = evaluateToolAvailability(allTools, updated, availabilityOptions);
+  const openclawStates = evaluateToolAvailability(
+    allTools,
+    { ...updated, executionMode: 'openclaw' as const },
+    availabilityOptions,
+  );
+  const fullControlStates = evaluateToolAvailability(
+    allTools,
+    { ...updated, executionMode: 'full_control' as const },
+    availabilityOptions,
+  );
+  const openclawByName = new Map(openclawStates.map((t) => [t.name, t]));
+  const fullControlByName = new Map(fullControlStates.map((t) => [t.name, t]));
+  const effectiveToolsWithModes = effectiveToolStates.map((tool) => ({
+    ...tool,
+    openclawStatus: openclawByName.get(tool.name)?.enabled ? 'on' as const : 'blocked' as const,
+    clawtalkStatus: fullControlByName.get(tool.name)?.enabled ? 'on' as const : 'blocked' as const,
+  }));
   const enabledTools = effectiveToolStates
     .filter((tool) => tool.enabled)
     .map(({ name, description, builtin }) => ({ name, description, builtin }));
@@ -1794,7 +1830,7 @@ async function handleUpdateTalkTools(
     defaultStateStream: updated.defaultStateStream,
     availableTools: allTools,
     enabledTools,
-    effectiveTools: effectiveToolStates,
+    effectiveTools: effectiveToolsWithModes,
     capabilities,
   });
 }
