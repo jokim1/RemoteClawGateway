@@ -588,6 +588,38 @@ async function buildTalkContextForAgent(
     sections.push(`## Instructions\n${onMessagePrompts.join('\n\n')}`);
   }
 
+  // Response policy — prompt the agent for 'off' and 'mentions' modes
+  const observeOnlyScopes: string[] = [];
+  const mentionsOnlyScopes: string[] = [];
+  for (const b of slackBehaviors) {
+    const mode = b.responseMode
+      ?? ((b as { autoRespond?: boolean }).autoRespond === false ? 'off' : 'all');
+    if (mode === 'all') continue;
+    const binding = (talk.platformBindings ?? []).find(pb => pb.id === b.platformBindingId);
+    if (!binding) continue;
+    const label = binding.displayScope ?? binding.scope;
+    if (mode === 'off') observeOnlyScopes.push(label);
+    else if (mode === 'mentions') mentionsOnlyScopes.push(label);
+  }
+  const policyLines: string[] = [];
+  if (observeOnlyScopes.length > 0) {
+    policyLines.push(
+      'Do not reply to messages from these channels. ' +
+      'Read them and update context.md if they contain relevant information.',
+      ...observeOnlyScopes.map(s => `- ${s}`),
+    );
+  }
+  if (mentionsOnlyScopes.length > 0) {
+    policyLines.push(
+      'Only reply in these channels when you are directly @mentioned. ' +
+      'Ignore messages that do not mention you.',
+      ...mentionsOnlyScopes.map(s => `- ${s}`),
+    );
+  }
+  if (policyLines.length > 0) {
+    sections.push('## Response Policy\n' + policyLines.join('\n'));
+  }
+
   // Objective
   if (talk.objective?.trim()) {
     sections.push(`## Objective\n${talk.objective.trim()}`);
@@ -597,24 +629,30 @@ async function buildTalkContextForAgent(
   const activeDirectives = (talk.directives ?? []).filter(d => d.active);
   if (activeDirectives.length > 0) {
     const lines = activeDirectives.map((d, i) => `${i + 1}. ${d.text}`);
-    sections.push(`## Rules\n${lines.join('\n')}`);
+    sections.push(
+      '## Rules\n' +
+      'Follow each directive as written. These are standing rules for this conversation.\n\n' +
+      lines.join('\n'),
+    );
   }
 
   // Conversation context (context.md)
   try {
     const contextMd = await store.getContextMd(talk.id);
     if (contextMd.trim()) {
-      sections.push(`## Conversation Context\n${contextMd.trim()}`);
+      sections.push(
+        `## Conversation Context\nThe following is a running summary of this conversation so far:\n\n${contextMd.trim()}`,
+      );
     }
   } catch {
     // context.md missing is non-fatal
   }
 
-  // Pinned references
+  // Pinned references (match client cap of 10)
   if (talk.pinnedMessageIds.length > 0) {
     try {
       const pinned = await Promise.all(
-        talk.pinnedMessageIds.slice(0, 5).map(id => store.getMessage(talk.id, id)),
+        talk.pinnedMessageIds.slice(0, 10).map(id => store.getMessage(talk.id, id)),
       );
       const validPins = pinned.filter(Boolean) as import('./types.js').TalkMessage[];
       if (validPins.length > 0) {
@@ -622,9 +660,13 @@ async function buildTalkContextForAgent(
           const preview = m.content.length > 200
             ? m.content.slice(0, 200) + '...'
             : m.content;
-          return `- ${m.role}: ${preview}`;
+          const ts = new Date(m.timestamp).toISOString().slice(0, 16).replace('T', ' ');
+          return `- ${m.role} (${ts}): ${preview}`;
         });
-        sections.push(`## Pinned References\n${pinLines.join('\n')}`);
+        const overflow = talk.pinnedMessageIds.length > 10
+          ? `\n- ... and ${talk.pinnedMessageIds.length - 10} more pinned messages`
+          : '';
+        sections.push(`## Pinned References\nThe user has pinned these as important:\n${pinLines.join('\n')}${overflow}`);
       }
     } catch {
       // non-fatal
