@@ -24,6 +24,7 @@ export interface SystemPromptInput {
   meta: TalkMeta;
   contextMd: string;
   pinnedMessages: TalkMessage[];
+  knowledgeTopics?: Array<{ slug: string; content: string }>;
   activeModel?: string;
   agentOverride?: {
     name: string;
@@ -42,7 +43,7 @@ function totalPromptBytes(sections: string[]): number {
 }
 
 export function composeSystemPrompt(input: SystemPromptInput): string | undefined {
-  const { meta, contextMd, pinnedMessages, activeModel, agentOverride, registry, toolManifest, toolMode } = input;
+  const { meta, contextMd, pinnedMessages, knowledgeTopics, activeModel, agentOverride, registry, toolManifest, toolMode } = input;
   const stateBackend = meta.stateBackend ?? 'stream_store';
   const defaultStateStream = meta.defaultStateStream ?? 'default';
 
@@ -218,6 +219,19 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
     );
   }
 
+  // Knowledge topics (durable facts matched to this message)
+  if (knowledgeTopics && knowledgeTopics.length > 0) {
+    const topicSections = knowledgeTopics.map(
+      t => `### ${t.slug}\n${t.content.trim()}`,
+    );
+    sections.push(
+      '## Knowledge\n' +
+      'The following are durable facts about topics relevant to this message. ' +
+      'These persist across conversations and should be treated as established context.\n\n' +
+      topicSections.join('\n\n'),
+    );
+  }
+
   // Pinned references (capped at MAX_PINNED_IN_PROMPT)
   if (pinnedMessages.length > 0) {
     const capped = pinnedMessages.slice(0, MAX_PINNED_IN_PROMPT);
@@ -313,6 +327,7 @@ export function composeSystemPrompt(input: SystemPromptInput): string | undefine
   const optionalDropOrder = [
     '## Talk Automations',
     '## Active Automations',
+    '## Knowledge',
     '## Pinned References',
     '## Conversation Context',
     '## Channel Connections',

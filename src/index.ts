@@ -648,6 +648,23 @@ async function buildTalkContextForAgent(
     // context.md missing is non-fatal
   }
 
+  // Knowledge files index (agent can Read full content)
+  try {
+    const knowledgeIndex = await store.getKnowledgeIndex(talk.id);
+    if (knowledgeIndex.length > 0) {
+      const indexLines = knowledgeIndex.map(e => `- ${e.slug}: ${e.summary}`);
+      const dataDir = store.getDataDir();
+      sections.push(
+        '## Knowledge Files\n' +
+        'Durable domain knowledge is stored in topic files. Use `Read` to access full content.\n\n' +
+        indexLines.join('\n') + '\n\n' +
+        `Directory: ${dataDir}/talks/${talk.id}/knowledge/`,
+      );
+    }
+  } catch {
+    // non-fatal
+  }
+
   // Pinned references (match client cap of 10)
   if (talk.pinnedMessageIds.length > 0) {
     try {
@@ -679,6 +696,7 @@ async function buildTalkContextForAgent(
     `## State\n` +
     `Data directory: ${dataDir}/talks/${talk.id}/state/\n` +
     `Context file: ${dataDir}/talks/${talk.id}/context.md\n` +
+    `Knowledge directory: ${dataDir}/talks/${talk.id}/knowledge/\n` +
     `Update context.md when significant progress occurs (not every message).`,
   );
 

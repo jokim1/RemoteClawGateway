@@ -32,6 +32,7 @@ import type {
   TalkDiagnosticCategory,
   TalkDiagnosticIssue,
   TalkDiagnosticStatus,
+  KnowledgeIndexEntry,
   Logger,
 } from './types.js';
 
@@ -91,6 +92,21 @@ const DEFAULT_STATE_POLICY_BASE = {
 /** Validate that a talk ID is safe for use as a directory name. */
 function isValidId(id: string): boolean {
   return /^[\w-]+$/.test(id) && !id.includes('..');
+}
+
+/** Validate that a slug is safe for use as a knowledge topic filename. */
+export function isValidKnowledgeSlug(slug: string): boolean {
+  return /^[a-z0-9][a-z0-9-]{0,58}[a-z0-9]$/.test(slug) && !slug.includes('--');
+}
+
+/** Normalize a raw string into a valid knowledge slug. */
+export function normalizeKnowledgeSlug(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-')
+    .slice(0, 60);
 }
 
 function normalizePermission(raw: unknown): PlatformPermission {
@@ -590,6 +606,7 @@ export class TalkStore {
   // Caches
   private listTalksCache: TalkMeta[] | null = null;
   private contextCache = new Map<string, { content: string; expiresAt: number }>();
+  private knowledgeIndexCache = new Map<string, { entries: KnowledgeIndexEntry[]; expiresAt: number }>();
 
   onChange(listener: (event: TalkStoreChangeEvent) => void): () => void {
     this.changeListeners.add(listener);
@@ -971,6 +988,7 @@ export class TalkStore {
     this.talks.delete(id);
     this.invalidateListCache();
     this.contextCache.delete(id);
+    this.knowledgeIndexCache.delete(id);
     const now = Date.now();
     this.emitChange({
       type: 'deleted',
@@ -1257,6 +1275,111 @@ export class TalkStore {
       content,
       expiresAt: Date.now() + CONTEXT_CACHE_TTL_MS,
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Knowledge files (per-topic durable facts)
+  // -------------------------------------------------------------------------
+
+  private knowledgeDir(talkId: string): string {
+    return path.join(this.talksDir, talkId, 'knowledge');
+  }
+
+  async getKnowledgeIndex(talkId: string): Promise<KnowledgeIndexEntry[]> {
+    if (!isValidId(talkId)) return [];
+
+    const cached = this.knowledgeIndexCache.get(talkId);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.entries;
+    }
+
+    const indexPath = path.join(this.knowledgeDir(talkId), '_index.md');
+    try {
+      const raw = await fsp.readFile(indexPath, 'utf-8');
+      const entries: KnowledgeIndexEntry[] = [];
+      for (const line of raw.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const pipeIdx = trimmed.indexOf('|');
+        if (pipeIdx === -1) continue;
+        const slug = trimmed.slice(0, pipeIdx).trim();
+        const summary = trimmed.slice(pipeIdx + 1).trim();
+        if (!slug || !summary) continue;
+        if (!isValidKnowledgeSlug(slug)) continue;
+        entries.push({ slug, summary });
+      }
+      this.knowledgeIndexCache.set(talkId, {
+        entries,
+        expiresAt: Date.now() + CONTEXT_CACHE_TTL_MS,
+      });
+      return entries;
+    } catch {
+      return [];
+    }
+  }
+
+  async setKnowledgeIndex(talkId: string, entries: KnowledgeIndexEntry[]): Promise<void> {
+    if (!isValidId(talkId)) return;
+    const dir = this.knowledgeDir(talkId);
+    await fsp.mkdir(dir, { recursive: true });
+    const lines = entries.map(e => `${e.slug} | ${e.summary}`);
+    await fsp.writeFile(path.join(dir, '_index.md'), lines.join('\n') + '\n', 'utf-8');
+    this.knowledgeIndexCache.set(talkId, {
+      entries,
+      expiresAt: Date.now() + CONTEXT_CACHE_TTL_MS,
+    });
+  }
+
+  async getKnowledgeTopic(talkId: string, slug: string): Promise<string> {
+    if (!isValidId(talkId) || !isValidKnowledgeSlug(slug)) return '';
+    const filePath = path.join(this.knowledgeDir(talkId), `${slug}.md`);
+    try {
+      return await fsp.readFile(filePath, 'utf-8');
+    } catch {
+      return '';
+    }
+  }
+
+  async setKnowledgeTopic(talkId: string, slug: string, content: string, summary: string): Promise<void> {
+    if (!isValidId(talkId) || !isValidKnowledgeSlug(slug)) return;
+    const dir = this.knowledgeDir(talkId);
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, `${slug}.md`), content, 'utf-8');
+
+    // Update index
+    const index = await this.getKnowledgeIndex(talkId);
+    const existing = index.findIndex(e => e.slug === slug);
+    const entry: KnowledgeIndexEntry = { slug, summary, updatedAt: Date.now() };
+    if (existing >= 0) {
+      index[existing] = entry;
+    } else {
+      index.push(entry);
+    }
+    await this.setKnowledgeIndex(talkId, index);
+  }
+
+  async listKnowledgeTopicContents(talkId: string, slugs: string[]): Promise<Array<{ slug: string; content: string }>> {
+    const results: Array<{ slug: string; content: string }> = [];
+    for (const slug of slugs) {
+      const content = await this.getKnowledgeTopic(talkId, slug);
+      if (content) {
+        results.push({ slug, content });
+      }
+    }
+    return results;
+  }
+
+  async deleteKnowledgeTopic(talkId: string, slug: string): Promise<void> {
+    if (!isValidId(talkId) || !isValidKnowledgeSlug(slug)) return;
+    const filePath = path.join(this.knowledgeDir(talkId), `${slug}.md`);
+    await fsp.rm(filePath, { force: true }).catch(() => {});
+
+    // Update index
+    const index = await this.getKnowledgeIndex(talkId);
+    const filtered = index.filter(e => e.slug !== slug);
+    if (filtered.length !== index.length) {
+      await this.setKnowledgeIndex(talkId, filtered);
+    }
   }
 
   // -------------------------------------------------------------------------

@@ -10,7 +10,7 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { TalkStore } from './talk-store.js';
-import type { TalkMessage, ImageAttachmentMeta, Logger } from './types.js';
+import type { TalkMessage, ImageAttachmentMeta, KnowledgeIndexEntry, Logger } from './types.js';
 import type { ToolInfo, ToolRegistry } from './tool-registry.js';
 import type { ToolExecutor } from './tool-executor.js';
 import { sendJson, readJsonBody } from './http.js';
@@ -474,6 +474,51 @@ function selectHistoryWithinBudget(
   }
 
   return selected;
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge topic matching
+// ---------------------------------------------------------------------------
+
+const STOP_WORDS = new Set([
+  'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had',
+  'her', 'was', 'one', 'our', 'out', 'has', 'have', 'been', 'some', 'them',
+  'than', 'its', 'over', 'also', 'that', 'this', 'from', 'they', 'with',
+  'what', 'how', 'who', 'which', 'when', 'where', 'will', 'each', 'make',
+  'like', 'just', 'into', 'about', 'could', 'would', 'should', 'does',
+  'doing', 'being', 'there', 'their', 'then', 'more', 'very', 'here',
+]);
+
+function extractWords(text: string): Set<string> {
+  const words = new Set<string>();
+  for (const word of text.toLowerCase().match(/[a-z0-9]+/g) ?? []) {
+    if (word.length >= 3 && !STOP_WORDS.has(word)) {
+      words.add(word);
+    }
+  }
+  return words;
+}
+
+/**
+ * Match knowledge topics whose slug or summary words overlap with message words.
+ * Returns matching slugs.
+ */
+export function matchKnowledgeTopics(message: string, index: KnowledgeIndexEntry[]): string[] {
+  if (index.length === 0) return [];
+  const messageWords = extractWords(message);
+  if (messageWords.size === 0) return [];
+
+  const matched: string[] = [];
+  for (const entry of index) {
+    const topicWords = extractWords(entry.slug.replace(/-/g, ' ') + ' ' + entry.summary);
+    for (const word of topicWords) {
+      if (messageWords.has(word)) {
+        matched.push(entry.slug);
+        break;
+      }
+    }
+  }
+  return matched;
 }
 
 export interface TalkChatContext {
@@ -1132,8 +1177,13 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     return;
   }
 
-  // Load context and pinned messages
+  // Load context, knowledge, and pinned messages
   const contextMd = await store.getContextMd(talkId);
+  const knowledgeIndex = await store.getKnowledgeIndex(talkId);
+  const matchedSlugs = matchKnowledgeTopics(body.message, knowledgeIndex);
+  const knowledgeTopics = matchedSlugs.length > 0
+    ? await store.listKnowledgeTopicContents(talkId, matchedSlugs)
+    : [];
   const pinnedMessages: TalkMessage[] = [];
   for (const pinId of meta.pinnedMessageIds) {
     const msg = await store.getMessage(talkId, pinId);
@@ -1151,6 +1201,7 @@ export async function handleTalkChat(ctx: TalkChatContext): Promise<void> {
     meta,
     contextMd,
     pinnedMessages,
+    knowledgeTopics,
     activeModel: model,
     agentOverride,
     toolManifest: availableToolInfos,

@@ -410,4 +410,10 @@ export interface ClawTalkPluginConfig {
   jobTimeoutMs?: number;
 }
 
+export interface KnowledgeIndexEntry {
+  slug: string;
+  summary: string;
+  updatedAt?: number;
+}
+
 export type { IncomingMessage, ServerResponse };

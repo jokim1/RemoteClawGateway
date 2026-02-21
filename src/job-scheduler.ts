@@ -21,6 +21,7 @@ import type { ToolInfo } from './tool-registry.js';
 import type { ToolRegistry } from './tool-registry.js';
 import type { ToolExecutor } from './tool-executor.js';
 import { composeSystemPrompt } from './system-prompt.js';
+import { matchKnowledgeTopics } from './talk-chat.js';
 import { runToolLoopNonStreaming } from './tool-loop.js';
 import { getToolCatalog } from './tool-catalog.js';
 import { googleDocsAuthStatusForProfile } from './google-docs.js';
@@ -771,6 +772,13 @@ export async function executeJob(
       meta.pinnedMessageIds.map(id => store.getMessage(talkId, id)),
     );
 
+    // Load knowledge topics matched against the job prompt
+    const knowledgeIndex = await store.getKnowledgeIndex(talkId);
+    const matchedSlugs = matchKnowledgeTopics(job.prompt, knowledgeIndex);
+    const knowledgeTopics = matchedSlugs.length > 0
+      ? await store.listKnowledgeTopicContents(talkId, matchedSlugs)
+      : [];
+
     const catalog = getToolCatalog(dataDir, logger);
     const proxyGatewayToolsEnabled = resolveProxyGatewayToolsEnabled(
       process.env.CLAWTALK_PROXY_GATEWAY_TOOLS_ENABLED,
@@ -828,6 +836,7 @@ export async function executeJob(
       meta,
       contextMd,
       pinnedMessages: pinnedMessages.filter(Boolean) as any[],
+      knowledgeTopics,
       registry,
       toolManifest: availableToolInfos,
       toolMode: meta.toolMode ?? 'auto',
