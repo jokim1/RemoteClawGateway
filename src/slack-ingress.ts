@@ -2490,6 +2490,33 @@ export function handleSlackMessageSendingHook(
   return { cancel: true };
 }
 
+/**
+ * Read-only check: is there an active suppression lease for the given target?
+ * Used by the `before_tool_call` hook to block OpenClaw's agent `message` tool
+ * without consuming the lease (the `message_sending` hook still handles that).
+ */
+export function hasActiveSuppressionForTarget(params: {
+  accountId?: string;
+  target: string;
+}): { talkId: string; eventId: string } | undefined {
+  pruneOutboundSuppressions();
+  const normalized = normalizeTarget(params.target);
+  if (!normalized) return undefined;
+
+  const accountId = params.accountId?.trim().toLowerCase();
+  const candidates = accountId
+    ? [buildSuppressionKey(accountId, normalized), buildSuppressionKey(undefined, normalized)]
+    : [buildSuppressionKey(undefined, normalized)];
+
+  for (const key of candidates) {
+    const lease = outboundSuppressions.get(key);
+    if (lease && Date.now() < lease.expiresAt && lease.remainingCancels > 0) {
+      return { talkId: lease.talkId, eventId: lease.eventId };
+    }
+  }
+  return undefined;
+}
+
 export async function handleSlackIngress(
   ctx: HandlerContext,
   deps: SlackIngressDeps,

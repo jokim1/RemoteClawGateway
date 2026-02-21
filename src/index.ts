@@ -36,6 +36,7 @@ import {
   getSlackIngressTalkRuntimeSnapshot,
   handleSlackMessageReceivedHook,
   handleSlackMessageSendingHook,
+  hasActiveSuppressionForTarget,
 } from './slack-ingress.js';
 import { normalizeSlackBindingScope } from './talks.js';
 import { findOpenClawSlackOwnershipConflicts } from './slack-ownership-doctor.js';
@@ -909,6 +910,51 @@ const plugin = {
       }
       return suppression;
     });
+    // Block OpenClaw's agent `message` tool when ClawTalk owns the conversation.
+    // The agent's tool calls bypass `message_sending`, so this is the only way
+    // to prevent dual responses in socket mode.
+    api.on('before_tool_call', (event: any, ctx: any) => {
+      if (!isGatewayReady()) return undefined;
+
+      const toolName = typeof event?.toolName === 'string' ? event.toolName.trim().toLowerCase() : '';
+      if (toolName !== 'message') return undefined;
+
+      const params = event?.params && typeof event.params === 'object'
+        ? event.params as Record<string, unknown> : null;
+      if (!params) return undefined;
+
+      // Only block send/thread-reply actions
+      const action = typeof params.action === 'string' ? params.action.trim().toLowerCase() : '';
+      if (action !== 'send' && action !== 'thread-reply') return undefined;
+
+      // Only block Slack sends
+      const provider = (typeof params.provider === 'string' ? params.provider.trim()
+        : typeof params.channel === 'string' ? params.channel.trim() : '').toLowerCase();
+      if (provider && provider !== 'slack') return undefined;
+
+      const to = typeof params.to === 'string' ? params.to.trim() : '';
+      if (!to) return undefined;
+
+      // Don't block ClawTalk's own sessions (full_control or job mode)
+      const sessionKey = typeof ctx?.sessionKey === 'string' ? ctx.sessionKey : '';
+      if (sessionKey.startsWith('talk:clawtalk:') || sessionKey.startsWith('job:clawtalk:')) {
+        return undefined;
+      }
+
+      // Check for active suppression (means ClawTalk claimed this event)
+      const accountId = typeof params.accountId === 'string' ? params.accountId : undefined;
+      const suppression = hasActiveSuppressionForTarget({ accountId, target: to });
+      if (suppression) {
+        api.logger.info(
+          `ClawTalk: blocked agent message tool for ${to} ` +
+          `(talk=${suppression.talkId} event=${suppression.eventId} session=${sessionKey || '-'})`,
+        );
+        return { block: true, blockReason: `ClawTalk is handling this conversation (talk=${suppression.talkId})` };
+      }
+
+      return undefined;
+    });
+
     api.on('message_sent', (event: any, ctx: any) => {
       emitOpenClawMessageDebug('send_ok', event, ctx);
       return undefined;

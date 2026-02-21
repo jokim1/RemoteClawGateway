@@ -179,6 +179,7 @@ See `docs/FIX-PLAN-2026-02-20.md` for detailed fix proposals.
 | Suppression TTL leak (120s default) | High | **Fixed** (heartbeat refresh) |
 | Dead letter race condition | High | **Fixed** (suppression clear on dead letter) |
 | full_control mode omitted session key → OpenClaw embedded agent triggered | Critical | **Fixed** |
+| Agent `message` tool bypasses `message_sending` hook → dual Slack responses | Critical | **Fixed** (`before_tool_call` hook) |
 | Ownership doctor detection-only, no auto-remediation | Medium | Open |
 | Slack routing sync only runs at startup, not on binding change | Medium | Open |
 | Gateway origin resolution inconsistency across files | Low | Open |
@@ -188,10 +189,11 @@ See `docs/FIX-PLAN-2026-02-20.md` for detailed fix proposals.
 ## ⚠️ Warnings for Future Agents
 
 1. **Do not set `x-openclaw-agent-id` in `full_control` mode.** The `assertRoutingHeaders()` guard in `routing-headers.ts` will throw `RoutingGuardError`. Session keys ARE allowed in full_control mode but MUST NOT have an `agent:` prefix — non-agent keys (e.g., `talk:clawtalk:...`) are classified as `legacy_or_alias` by OpenClaw and bypass the embedded agent.
-2. **The `message_received` hook return value is IGNORED by OpenClaw.** Do not rely on `{ cancel: true }` to prevent dual processing. Use the handoff endpoint instead (`gateway.clawtalk.slackHandoff.enabled` in `openclaw.json`).
+2. **The `message_received` hook return value is IGNORED by OpenClaw.** Do not rely on `{ cancel: true }` to prevent dual processing. The `before_tool_call` hook blocks the agent's `message` tool instead (see index.ts).
 3. **The `ctx.channelId` in OpenClaw's `message_received` hook is the platform name** (e.g., "slack"), not a Slack channel ID. Don't confuse it with the Slack channel ID in `SlackIngressEvent.channelId`.
 4. **Suppression leases are refreshed every 30s during LLM processing** but still time-limited (120s TTL, max 10 cancels). If the heartbeat is somehow interrupted, OpenClaw outbound may leak.
 5. **`reconcileSlackRoutingForTalks()` only runs at startup.** New Talk bindings won't take effect until gateway restart.
+6. **The `before_tool_call` hook blocks OpenClaw's agent `message` tool** when a suppression lease is active. It does NOT block ClawTalk's own sessions (`talk:clawtalk:*` / `job:clawtalk:*` prefixes). The hook is read-only — it checks but does not consume suppression leases.
 
 ## Related Projects
 
