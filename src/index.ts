@@ -923,16 +923,18 @@ const plugin = {
         ? event.params as Record<string, unknown> : null;
       if (!params) return undefined;
 
-      // Only block send/thread-reply actions
+      // Only block message-sending actions
       const action = typeof params.action === 'string' ? params.action.trim().toLowerCase() : '';
-      if (action !== 'send' && action !== 'thread-reply') return undefined;
+      if (action !== 'send' && action !== 'thread-reply' && action !== 'reply') return undefined;
 
       // Only block Slack sends
       const provider = (typeof params.provider === 'string' ? params.provider.trim()
         : typeof params.channel === 'string' ? params.channel.trim() : '').toLowerCase();
       if (provider && provider !== 'slack') return undefined;
 
-      const to = typeof params.to === 'string' ? params.to.trim() : '';
+      // OpenClaw's message tool uses `target` as primary, `to` as legacy alias
+      const to = typeof params.target === 'string' ? params.target.trim()
+        : typeof params.to === 'string' ? params.to.trim() : '';
       if (!to) return undefined;
 
       // Don't block ClawTalk's own sessions (full_control or job mode)
